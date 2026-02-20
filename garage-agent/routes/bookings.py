@@ -2,7 +2,7 @@ from datetime import date
 
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, contains_eager
 
 from db.session import get_db
@@ -60,6 +60,24 @@ def list_bookings(
         }
         for booking in bookings
     ]
+
+
+@router.get("/summary")
+def bookings_summary(db: Session = Depends(get_db)):
+    counts_by_status = {status.lower(): 0 for status in ALLOWED_STATUSES}
+
+    rows = db.execute(
+        select(Booking.status, func.count(Booking.id)).group_by(Booking.status)
+    ).all()
+
+    total = 0
+    for status, count in rows:
+        total += count
+        normalized_status = status.lower()
+        if normalized_status in counts_by_status:
+            counts_by_status[normalized_status] = count
+
+    return {"total": total, **counts_by_status}
 
 
 @router.patch("/{booking_id}/status")
