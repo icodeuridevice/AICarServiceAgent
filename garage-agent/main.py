@@ -42,6 +42,7 @@ app = FastAPI(
 app.include_router(webhook.router)
 app.include_router(bookings.router)
 
+
 @app.get("/", tags=["health"])
 def root() -> dict[str, str]:
     """Simple status endpoint for uptime checks."""
