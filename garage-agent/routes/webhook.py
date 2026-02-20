@@ -8,13 +8,12 @@ import logging
 from datetime import date, datetime, time, timedelta
 from xml.sax.saxutils import escape
 
-from fastapi import APIRouter, Depends, Form, HTTPException
+from fastapi import APIRouter, Depends, Form
 from fastapi.responses import Response
 from sqlalchemy import select
-from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from db.models import Booking, Customer, Vehicle
+from db.models import Customer
 from db.session import get_db
 from services.conversation_service import (
     clear_state,
@@ -23,6 +22,7 @@ from services.conversation_service import (
     set_state,
     update_data,
 )
+from services.booking_service import create_booking
 from services.extractor import extract_booking_details
 
 router = APIRouter(tags=["webhook"])
@@ -120,46 +120,6 @@ def _get_or_create_customer(db: Session, phone: str) -> Customer:
     return customer
 
 
-def _get_or_create_vehicle(db: Session, customer_id: int) -> Vehicle:
-    """Fetch a customer's first vehicle or create one."""
-    vehicle = db.scalar(
-        select(Vehicle).where(Vehicle.customer_id == customer_id).order_by(Vehicle.id.asc())
-    )
-    if vehicle is None:
-        vehicle = Vehicle(customer_id=customer_id)
-        db.add(vehicle)
-        db.flush()
-    return vehicle
-
-
-def _persist_booking(
-    db: Session,
-    phone: str,
-    service_type: str,
-    service_date: date,
-    service_time: time,
-) -> None:
-    """Persist final booking details with relational links."""
-    try:
-        customer = _get_or_create_customer(db=db, phone=phone)
-        vehicle = _get_or_create_vehicle(db=db, customer_id=customer.id)
-
-        booking = Booking(
-            vehicle_id=vehicle.id,
-            service_type=service_type,
-            service_date=service_date,
-            service_time=service_time,
-            status="PENDING",
-        )
-
-        db.add(booking)
-        db.commit()
-    except SQLAlchemyError:
-        db.rollback()
-        logger.exception("Failed to store booking for phone=%s", phone)
-        raise HTTPException(status_code=500, detail="Failed to store booking.") from None
-
-
 @router.post("/webhook")
 async def receive_webhook(
     From: str = Form(...),
@@ -233,13 +193,21 @@ async def receive_webhook(
             return Response(content=twiml_response, media_type="application/xml")
 
         clear_state(phone)
-        _persist_booking(
-            db=db,
-            phone=phone,
-            service_type=service_type,
-            service_date=parsed_service_date,
-            service_time=parsed_service_time,
-        )
+        try:
+            customer = _get_or_create_customer(db=db, phone=phone)
+
+            create_booking(
+                db=db,
+                customer_id=customer.id,
+                service_type=service_type,
+                service_date=parsed_service_date,
+                service_time=parsed_service_time,
+            )
+
+        except ValueError as e:
+            reply = str(e)
+            twiml_response = _build_twiml_reply(reply)
+            return Response(content=twiml_response, media_type="application/xml")
 
         confirmed_date = parsed_service_date.strftime("%Y-%m-%d")
         confirmed_time = parsed_service_time.strftime("%H:%M")
