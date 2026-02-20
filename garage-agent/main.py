@@ -14,7 +14,8 @@ from collections.abc import AsyncIterator
 from fastapi import FastAPI
 
 from db.init_db import init_db
-from routes import webhook
+import routes.webhook as webhook
+import routes.bookings as bookings
 
 logging.basicConfig(
     level=logging.INFO,
@@ -39,7 +40,7 @@ app = FastAPI(
 )
 
 app.include_router(webhook.router)
-
+app.include_router(bookings.router)
 
 @app.get("/", tags=["health"])
 def root() -> dict[str, str]:
