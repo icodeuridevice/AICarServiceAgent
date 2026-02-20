@@ -62,6 +62,36 @@ def list_bookings(
     ]
 
 
+@router.get("/today")
+def list_todays_bookings(db: Session = Depends(get_db)):
+    today = date.today()
+
+    rows = db.execute(
+        select(
+            Booking.id.label("booking_id"),
+            Customer.phone.label("customer_phone"),
+            Booking.service_type,
+            Booking.service_time,
+            Booking.status,
+        )
+        .join(Booking.vehicle)
+        .join(Vehicle.customer)
+        .where(Booking.service_date == today)
+        .order_by(Booking.service_time.asc())
+    ).all()
+
+    return [
+        {
+            "booking_id": row.booking_id,
+            "customer_phone": row.customer_phone,
+            "service_type": row.service_type,
+            "service_time": row.service_time.isoformat(),
+            "status": row.status,
+        }
+        for row in rows
+    ]
+
+
 @router.get("/summary")
 def bookings_summary(db: Session = Depends(get_db)):
     counts_by_status = {status.lower(): 0 for status in ALLOWED_STATUSES}
