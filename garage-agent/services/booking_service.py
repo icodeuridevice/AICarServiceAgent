@@ -9,6 +9,13 @@ from sqlalchemy.orm import Session
 from db.models import Booking, Customer, Vehicle
 
 ACTIVE_STATUSES = ("PENDING", "CONFIRMED", "IN_PROGRESS")
+ALLOWED_TRANSITIONS = {
+    "PENDING": {"CONFIRMED", "CANCELLED"},
+    "CONFIRMED": {"IN_PROGRESS", "CANCELLED"},
+    "IN_PROGRESS": {"COMPLETED"},
+    "COMPLETED": set(),
+    "CANCELLED": set(),
+}
 
 
 def check_slot_conflict(db: Session, service_date: date, service_time: time) -> bool:
@@ -61,6 +68,27 @@ def create_booking(
         )
 
         db.add(booking)
+        db.commit()
+        db.refresh(booking)
+        return booking
+    except SQLAlchemyError:
+        db.rollback()
+        raise
+
+
+def update_booking_status(db: Session, booking_id: int, new_status: str) -> Booking:
+    """Update booking status when the requested transition is allowed."""
+    booking = db.scalar(select(Booking).where(Booking.id == booking_id))
+    if booking is None:
+        raise ValueError("Booking not found.")
+
+    current_status = booking.status
+    allowed_next_statuses = ALLOWED_TRANSITIONS.get(current_status, set())
+    if new_status not in allowed_next_statuses:
+        raise ValueError("Invalid status transition.")
+
+    try:
+        booking.status = new_status
         db.commit()
         db.refresh(booking)
         return booking
