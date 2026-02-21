@@ -93,8 +93,9 @@ def start_scheduler() -> BackgroundScheduler:
 
     scheduler.add_job(
         _send_daily_reminders,
-        trigger="interval",
-        minutes=1,
+        trigger="cron",
+        hour=9,
+        minute=0,
         id="daily_booking_reminder",
         name="Send daily WhatsApp booking reminders",
         replace_existing=True,
