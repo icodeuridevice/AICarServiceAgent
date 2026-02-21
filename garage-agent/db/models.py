@@ -2,7 +2,7 @@
 
 from datetime import date, datetime, time
 
-from sqlalchemy import Date, DateTime, ForeignKey, String, Time, func, text
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, String, Time, func, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from db.session import Base
@@ -70,6 +70,22 @@ class Booking(Base):
         DateTime(timezone=True),
         nullable=False,
         server_default=func.now(),
+    )
+    reminder_sent: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=text("0"),
+    )
+    reminder_sent_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
+    reminder_message_sid: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+        default=None,
     )
 
     vehicle: Mapped["Vehicle"] = relationship(back_populates="bookings")

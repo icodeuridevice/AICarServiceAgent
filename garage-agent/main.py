@@ -14,6 +14,7 @@ from collections.abc import AsyncIterator
 from fastapi import FastAPI
 
 from db.init_db import init_db
+from scheduler.reminder_scheduler import start_scheduler
 import routes.webhook as webhook
 import routes.bookings as bookings
 
@@ -30,7 +31,20 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # Ensure SQL tables exist at app startup.
     init_db()
     logger.info("Database tables initialized.")
+
+    # Start the background reminder scheduler (non-blocking).
+    try:
+        scheduler = start_scheduler()
+    except Exception:
+        logger.exception("Failed to start scheduler.")
+        scheduler = None
+
     yield
+
+    # Graceful shutdown.
+    if scheduler:
+        scheduler.shutdown(wait=False)
+        logger.info("Reminder scheduler shut down.")
 
 app = FastAPI(
     title="Garage Agent API",
