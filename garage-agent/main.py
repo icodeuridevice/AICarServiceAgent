@@ -13,11 +13,9 @@ from collections.abc import AsyncIterator
 
 from fastapi import FastAPI
 
-from db.init_db import init_db
-from scheduler.reminder_scheduler import start_scheduler
-import routes.webhook as webhook
-import routes.bookings as bookings
-import routes.twilio_webhook as twilio_webhook
+from garage_agent.db.init_db import init_db
+from garage_agent.scheduler.reminder_scheduler import start_scheduler
+from garage_agent.routes import webhook, bookings, twilio_webhook
 
 logging.basicConfig(
     level=logging.INFO,
