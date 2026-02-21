@@ -39,6 +39,7 @@ def send_whatsapp_message(to: str, body: str) -> str:
         from_=TWILIO_WHATSAPP_FROM,
         to=f"whatsapp:{to}",
         body=body,
+        status_callback="https://dulcie-unreported-winterly.ngrok-free.dev/twilio/status",
     )
 
     logger.info("WhatsApp message sent to %s (SID: %s)", to, message.sid)

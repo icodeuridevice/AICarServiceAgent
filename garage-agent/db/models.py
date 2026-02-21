@@ -88,4 +88,15 @@ class Booking(Base):
         default=None,
     )
 
+    delivery_status: Mapped[str | None] = mapped_column(
+        String(32),
+        nullable=True,
+        default=None,
+)
+
+    delivered_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
     vehicle: Mapped["Vehicle"] = relationship(back_populates="bookings")

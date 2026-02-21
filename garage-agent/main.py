@@ -17,6 +17,7 @@ from db.init_db import init_db
 from scheduler.reminder_scheduler import start_scheduler
 import routes.webhook as webhook
 import routes.bookings as bookings
+import routes.twilio_webhook as twilio_webhook
 
 logging.basicConfig(
     level=logging.INFO,
@@ -55,7 +56,7 @@ app = FastAPI(
 
 app.include_router(webhook.router)
 app.include_router(bookings.router)
-
+app.include_router(twilio_webhook.router)
 
 @app.get("/", tags=["health"])
 def root() -> dict[str, str]:
