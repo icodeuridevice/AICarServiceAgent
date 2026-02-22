@@ -2,7 +2,7 @@
 
 from datetime import date, time
 
-from sqlalchemy import func
+from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -21,7 +21,7 @@ ALLOWED_TRANSITIONS = {
 
 def check_slot_conflict(db: Session, service_date: date, service_time: time) -> bool:
     active_count = db.scalar(
-        select(func.count())
+        select(func.count(Booking.id))
         .select_from(Booking)
         .where(Booking.service_date == service_date)
         .where(Booking.service_time == service_time)
