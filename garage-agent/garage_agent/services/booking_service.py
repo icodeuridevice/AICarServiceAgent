@@ -95,3 +95,70 @@ def update_booking_status(db: Session, booking_id: int, new_status: str) -> Book
     except SQLAlchemyError:
         db.rollback()
         raise
+
+
+def reschedule_booking(
+    db: Session,
+    booking_id: int,
+    new_date: date,
+    new_time: time,
+) -> Booking:
+    booking = db.scalar(select(Booking).where(Booking.id == booking_id))
+
+    if booking is None:
+        raise ValueError("Booking not found.")
+
+    if booking.status not in {"PENDING", "CONFIRMED"}:
+        raise ValueError("Only PENDING or CONFIRMED bookings can be rescheduled.")
+
+    # Check slot conflict
+    if check_slot_conflict(db=db, service_date=new_date, service_time=new_time):
+        raise ValueError("Selected time slot is already booked.")
+
+    try:
+        booking.service_date = new_date
+        booking.service_time = new_time
+
+        # Reset lifecycle
+        booking.status = "PENDING"
+        booking.reminder_sent = False
+        booking.reminder_sent_at = None
+        booking.reminder_message_sid = None
+        booking.delivery_status = None
+        booking.delivered_at = None
+
+        db.commit()
+        db.refresh(booking)
+        return booking
+
+    except SQLAlchemyError:
+        db.rollback()
+        raise
+
+
+def cancel_booking(db: Session, booking_id: int) -> Booking:
+    booking = db.scalar(select(Booking).where(Booking.id == booking_id))
+
+    if booking is None:
+        raise ValueError("Booking not found.")
+
+    if booking.status not in {"PENDING", "CONFIRMED"}:
+        raise ValueError("Only PENDING or CONFIRMED bookings can be cancelled.")
+
+    try:
+        booking.status = "CANCELLED"
+
+        # Optional: clear reminder fields
+        booking.reminder_sent = False
+        booking.reminder_sent_at = None
+        booking.reminder_message_sid = None
+        booking.delivery_status = None
+        booking.delivered_at = None
+
+        db.commit()
+        db.refresh(booking)
+        return booking
+
+    except SQLAlchemyError:
+        db.rollback()
+        raise

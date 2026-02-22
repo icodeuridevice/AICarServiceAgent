@@ -14,6 +14,9 @@ router = APIRouter(prefix="/bookings", tags=["bookings"])
 class StatusUpdate(BaseModel):
     status: str
 
+class RescheduleRequest(BaseModel):
+    service_date: date
+    service_time: time
 
 ALLOWED_STATUSES = ["PENDING", "CONFIRMED", "IN_PROGRESS", "COMPLETED", "CANCELLED"]
 
@@ -132,3 +135,41 @@ def update_status(booking_id: int, payload: StatusUpdate, db: Session = Depends(
     db.refresh(booking)
 
     return booking
+
+
+@router.patch("/{booking_id}/reschedule")
+def reschedule(
+    booking_id: int,
+    payload: RescheduleRequest,
+    db: Session = Depends(get_db),
+):
+    from garage_agent.services.booking_service import reschedule_booking
+
+    booking = reschedule_booking(
+        db=db,
+        booking_id=booking_id,
+        new_date=payload.service_date,
+        new_time=payload.service_time,
+    )
+
+    return {
+        "booking_id": booking.id,
+        "new_date": booking.service_date,
+        "new_time": booking.service_time,
+        "status": booking.status,
+    }
+
+
+@router.patch("/{booking_id}/cancel")
+def cancel(
+    booking_id: int,
+    db: Session = Depends(get_db),
+):
+    from garage_agent.services.booking_service import cancel_booking
+
+    booking = cancel_booking(db=db, booking_id=booking_id)
+
+    return {
+        "booking_id": booking.id,
+        "status": booking.status,
+    }
