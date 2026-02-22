@@ -17,6 +17,7 @@ from garage_agent.db.init_db import init_db
 from garage_agent.scheduler.reminder_scheduler import start_scheduler
 from garage_agent.routes import webhook, bookings, twilio_webhook
 from garage_agent.routes import jobcards
+from garage_agent.routes.reports import router as reports_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -57,6 +58,7 @@ app.include_router(webhook.router)
 app.include_router(bookings.router)
 app.include_router(twilio_webhook.router)
 app.include_router(jobcards.router)
+app.include_router(reports_router)
 
 @app.get("/", tags=["health"])
 def root() -> dict[str, str]:
