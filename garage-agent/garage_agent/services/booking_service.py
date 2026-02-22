@@ -2,13 +2,14 @@
 
 from datetime import date, time
 
-from sqlalchemy import select
+from sqlalchemy import func
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from garage_agent.db.models import Booking, Customer, Vehicle
 
 ACTIVE_STATUSES = ("PENDING", "CONFIRMED", "IN_PROGRESS")
+MAX_SLOT_CAPACITY = 2  # configurable
 ALLOWED_TRANSITIONS = {
     "PENDING": {"CONFIRMED", "CANCELLED"},
     "CONFIRMED": {"IN_PROGRESS", "CANCELLED"},
@@ -19,16 +20,15 @@ ALLOWED_TRANSITIONS = {
 
 
 def check_slot_conflict(db: Session, service_date: date, service_time: time) -> bool:
-    """Return whether an active booking already occupies the same slot."""
-    existing_booking_id = db.scalar(
-        select(Booking.id)
+    active_count = db.scalar(
+        select(func.count())
+        .select_from(Booking)
         .where(Booking.service_date == service_date)
         .where(Booking.service_time == service_time)
         .where(Booking.status.in_(ACTIVE_STATUSES))
-        .limit(1)
     )
-    return existing_booking_id is not None
 
+    return active_count >= MAX_SLOT_CAPACITY
 
 def _get_or_create_vehicle_for_customer(db: Session, customer_id: int) -> Vehicle:
     """Return the customer's first vehicle, creating one when missing."""
