@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, time
 
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
@@ -15,6 +15,7 @@ class StatusUpdate(BaseModel):
     status: str
 
 class RescheduleRequest(BaseModel):
+    booking_id: int
     service_date: date
     service_time: time
 
@@ -137,17 +138,16 @@ def update_status(booking_id: int, payload: StatusUpdate, db: Session = Depends(
     return booking
 
 
-@router.patch("/{booking_id}/reschedule")
-def reschedule(
-    booking_id: int,
+@router.put("/reschedule")
+def reschedule_booking(
     payload: RescheduleRequest,
     db: Session = Depends(get_db),
 ):
-    from garage_agent.services.booking_service import reschedule_booking
+    from garage_agent.services.booking_service import reschedule_booking as reschedule_engine
 
-    booking = reschedule_booking(
+    booking = reschedule_engine(
         db=db,
-        booking_id=booking_id,
+        booking_id=payload.booking_id,
         new_date=payload.service_date,
         new_time=payload.service_time,
     )
