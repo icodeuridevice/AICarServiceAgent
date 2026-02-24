@@ -8,6 +8,9 @@ from sqlalchemy.orm import Session, contains_eager
 from garage_agent.db.session import get_db
 from garage_agent.db.models import Booking, Customer, Vehicle
 
+from garage_agent.schemas.common import APIResponse
+from garage_agent.schemas.booking import BookingSummaryResponse
+
 router = APIRouter(prefix="/bookings", tags=["bookings"])
 
 
@@ -96,7 +99,7 @@ def list_todays_bookings(db: Session = Depends(get_db)):
     ]
 
 
-@router.get("/summary")
+@router.get("/summary", response_model=APIResponse[BookingSummaryResponse])
 def bookings_summary(db: Session = Depends(get_db)):
     counts_by_status = {status.lower(): 0 for status in ALLOWED_STATUSES}
 
@@ -111,8 +114,13 @@ def bookings_summary(db: Session = Depends(get_db)):
         if normalized_status in counts_by_status:
             counts_by_status[normalized_status] = count
 
-    return {"total": total, **counts_by_status}
-
+    return APIResponse(
+        success=True,
+        data=BookingSummaryResponse(
+            total=total,
+            **counts_by_status
+        )
+    )
 
 @router.patch("/{booking_id}/status")
 def update_status(booking_id: int, payload: StatusUpdate, db: Session = Depends(get_db)):
