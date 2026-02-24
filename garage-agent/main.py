@@ -25,9 +25,11 @@ from garage_agent.core.exceptions import http_exception_handler
 from garage_agent.core.domain_exceptions import DomainException
 from garage_agent.core.exceptions import domain_exception_handler
 
+from garage_agent.core.middleware import RequestContextMiddleware
+
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
 logger = logging.getLogger(__name__)
 
@@ -59,6 +61,8 @@ app = FastAPI(
     description="AI-enabled garage booking backend foundation.",
     lifespan=lifespan,
 )
+
+app.add_middleware(RequestContextMiddleware)
 
 app.include_router(webhook.router)
 app.include_router(bookings.router)

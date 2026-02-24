@@ -11,6 +11,10 @@ from garage_agent.db.models import Booking, Customer, Vehicle
 from garage_agent.core.domain_exceptions import DomainException
 from garage_agent.core.error_codes import ErrorCode
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 ACTIVE_STATUSES = ("PENDING", "CONFIRMED", "IN_PROGRESS")
 MAX_SLOT_CAPACITY = 2  # configurable
 ALLOWED_TRANSITIONS = {
@@ -76,6 +80,15 @@ def create_booking(
         db.add(booking)
         db.commit()
         db.refresh(booking)
+        
+        logger.info(
+            "Booking created",
+            extra={
+                "booking_id": booking.id,
+                "customer_id": customer_id,
+            },
+        )
+        
         return booking
     except SQLAlchemyError:
         db.rollback()
