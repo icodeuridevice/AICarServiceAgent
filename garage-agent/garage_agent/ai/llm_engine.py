@@ -1,21 +1,69 @@
+"""
+LLM Engine – Agentic Execution Layer.
+
+Responsible for:
+1. Understanding user intent (LLM or rule fallback)
+2. Deciding which tool to call
+3. Returning structured tool intent
+"""
+
 import logging
+from sqlalchemy.orm import Session
+
+from garage_agent.ai.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
 
 
 class LLMEngine:
-    """
-    Future LLM-powered AI engine.
-    Currently stubbed for safe integration testing.
-    """
+    def __init__(self):
+        self.registry = ToolRegistry()
 
-    def process(self, phone: str, message: str) -> dict:
-        logger.info("LLM Engine invoked for %s", phone)
+    def process(self, db: Session, phone: str, message: str) -> dict:
+        """
+        Simulated LLM decision layer.
+        Replace later with real OpenAI/Gemini structured tool calling.
+        """
 
-        # For now, simulate structured AI output
+        logger.info("LLMEngine processing message: %s", message)
+
+        message_lower = message.lower()
+
+        # -------------------------
+        # Tool decision logic (mock)
+        # -------------------------
+        if "summary" in message_lower:
+            return {
+                "engine": "llm",
+                "type": "tool_call",
+                "tool": "get_daily_summary",
+                "args": {}
+            }
+
+        # Example future trigger
+        if "create job" in message_lower:
+            return {
+                "engine": "llm",
+                "type": "tool_call",
+                "tool": "create_jobcard",
+                "args": {
+                    "booking_id": 1,
+                    "technician_name": "Auto"
+                }
+            }
+
+        # Default conversational fallback
         return {
             "engine": "llm",
-            "intent": "booking_flow",
-            "confidence": 0.95,
-            "raw_message": message,
+            "type": "conversation",
+            "reply": "Please provide more details so I can assist you."
         }
+
+    def execute_tool(self, db: Session, tool_name: str, args: dict):
+        """Executes tool via registry safely."""
+        logger.info("Executing tool: %s with args: %s", tool_name, args)
+        return self.registry.execute(
+            tool_name=tool_name,
+            db=db,
+            **args,
+        )

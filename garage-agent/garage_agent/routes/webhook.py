@@ -126,10 +126,35 @@ async def receive_webhook(
     # ------------------------------------------------------------
     # AI Engine (future-proof layer)
     # ------------------------------------------------------------
+   
     ai_engine = get_ai_engine()
-    ai_output = ai_engine.process(phone=phone, message=incoming_message)
+    ai_response = ai_engine.process(db=db, phone=phone, message=incoming_message)
 
-    logger.info("AI Output: %s", ai_output)
+    logger.info("AI Output: %s", ai_response)
+
+    # -----------------------------
+    # TOOL CALL MODE
+    # -----------------------------
+    if ai_response.get("type") == "tool_call":
+        tool_name = ai_response.get("tool")
+        tool_args = ai_response.get("args", {})
+
+        try:
+            result = ai_engine.execute_tool(
+                db=db,
+                tool_name=tool_name,
+                args=tool_args,
+            )
+
+            reply = f"{tool_name} executed successfully.\nResult: {result}"
+
+        except Exception as e:
+            logger.exception("Tool execution failed")
+            reply = f"Tool execution failed: {str(e)}"
+
+        twiml_response = _build_twiml_reply(reply)
+        return Response(content=twiml_response, media_type="application/xml")
+
 
     # ------------------------------------------------------------
     # Rule-based extraction (current stable system)
