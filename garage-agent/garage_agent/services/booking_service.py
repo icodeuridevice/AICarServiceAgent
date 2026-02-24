@@ -8,6 +8,9 @@ from sqlalchemy.orm import Session
 
 from garage_agent.db.models import Booking, Customer, Vehicle
 
+from garage_agent.core.domain_exceptions import DomainException
+from garage_agent.core.error_codes import ErrorCode
+
 ACTIVE_STATUSES = ("PENDING", "CONFIRMED", "IN_PROGRESS")
 MAX_SLOT_CAPACITY = 2  # configurable
 ALLOWED_TRANSITIONS = {
@@ -55,7 +58,10 @@ def create_booking(
 ) -> Booking:
     """Create a booking when the requested slot has no active conflict."""
     if check_slot_conflict(db=db, service_date=service_date, service_time=service_time):
-        raise ValueError("Selected time slot is already booked.")
+        raise DomainException(
+            code=ErrorCode.SLOT_CONFLICT,
+            message="Selected time slot is already booked."
+        )
 
     try:
         vehicle = _get_or_create_vehicle_for_customer(db=db, customer_id=customer_id)
@@ -80,12 +86,18 @@ def update_booking_status(db: Session, booking_id: int, new_status: str) -> Book
     """Update booking status when the requested transition is allowed."""
     booking = db.scalar(select(Booking).where(Booking.id == booking_id))
     if booking is None:
-        raise ValueError("Booking not found.")
+        raise DomainException(
+            code=ErrorCode.BOOKING_NOT_FOUND,
+            message="Booking not found."
+        )
 
     current_status = booking.status
     allowed_next_statuses = ALLOWED_TRANSITIONS.get(current_status, set())
     if new_status not in allowed_next_statuses:
-        raise ValueError("Invalid status transition.")
+        raise DomainException(
+            code=ErrorCode.INVALID_STATUS,
+            message="Invalid status transition."
+        )
 
     try:
         booking.status = new_status
@@ -106,14 +118,23 @@ def reschedule_booking(
     booking = db.scalar(select(Booking).where(Booking.id == booking_id))
 
     if booking is None:
-        raise ValueError("Booking not found.")
+        raise DomainException(
+            code=ErrorCode.BOOKING_NOT_FOUND,
+            message="Booking not found."
+        )
 
     if booking.status not in {"PENDING", "CONFIRMED"}:
-        raise ValueError("Only PENDING or CONFIRMED bookings can be rescheduled.")
+        raise DomainException(
+            code=ErrorCode.INVALID_STATUS,
+            message="Only PENDING or CONFIRMED bookings can be rescheduled."
+        )
 
     # Check slot conflict
     if check_slot_conflict(db=db, service_date=new_date, service_time=new_time):
-        raise ValueError("Selected time slot is already booked.")
+        raise DomainException(
+            code=ErrorCode.SLOT_CONFLICT,
+            message="Selected time slot is already booked."
+        )
 
     try:
         booking.service_date = new_date
@@ -140,10 +161,16 @@ def cancel_booking(db: Session, booking_id: int) -> Booking:
     booking = db.scalar(select(Booking).where(Booking.id == booking_id))
 
     if booking is None:
-        raise ValueError("Booking not found.")
+        raise DomainException(
+            code=ErrorCode.BOOKING_NOT_FOUND,
+            message="Booking not found."
+        )
 
     if booking.status not in {"PENDING", "CONFIRMED"}:
-        raise ValueError("Only PENDING or CONFIRMED bookings can be cancelled.")
+        raise DomainException(
+            code=ErrorCode.INVALID_STATUS,
+            message="Only PENDING or CONFIRMED bookings can be cancelled."
+        )
 
     try:
         booking.status = "CANCELLED"

@@ -11,6 +11,15 @@ from garage_agent.db.models import Booking, Customer, Vehicle
 from garage_agent.schemas.common import APIResponse
 from garage_agent.schemas.booking import BookingSummaryResponse
 
+from typing import List
+from garage_agent.schemas.booking import (
+    BookingListItem,
+    TodayBookingItem,
+    BookingStatusResponse,
+    RescheduleResponse,
+    CancelResponse,
+)
+
 router = APIRouter(prefix="/bookings", tags=["bookings"])
 
 
@@ -33,7 +42,7 @@ VALID_TRANSITIONS = {
 }
 
 
-@router.get("/")
+@router.get("/", response_model=APIResponse[List[BookingListItem]])
 def list_bookings(
     status: str | None = None,
     service_date: date | None = None,
@@ -56,20 +65,23 @@ def list_bookings(
 
     bookings = db.execute(query).scalars().all()
 
-    return [
-        {
-            "booking_id": booking.id,
-            "customer_phone": booking.vehicle.customer.phone,
-            "service_type": booking.service_type,
-            "service_date": booking.service_date.isoformat(),
-            "service_time": booking.service_time.isoformat(),
-            "status": booking.status,
-        }
+    return APIResponse(
+    success=True,
+    data=[
+        BookingListItem(
+            booking_id=booking.id,
+            customer_phone=booking.vehicle.customer.phone,
+            service_type=booking.service_type,
+            service_date=booking.service_date,
+            service_time=booking.service_time,
+            status=booking.status,
+        )
         for booking in bookings
-    ]
+    ],
+)
 
 
-@router.get("/today")
+@router.get("/today", response_model=APIResponse[List[TodayBookingItem]])
 def list_todays_bookings(db: Session = Depends(get_db)):
     today = date.today()
 
@@ -87,16 +99,19 @@ def list_todays_bookings(db: Session = Depends(get_db)):
         .order_by(Booking.service_time.asc())
     ).all()
 
-    return [
-        {
-            "booking_id": row.booking_id,
-            "customer_phone": row.customer_phone,
-            "service_type": row.service_type,
-            "service_time": row.service_time.isoformat(),
-            "status": row.status,
-        }
+    return APIResponse(
+    success=True,
+    data=[
+        TodayBookingItem(
+            booking_id=row.booking_id,
+            customer_phone=row.customer_phone,
+            service_type=row.service_type,
+            service_time=row.service_time,
+            status=row.status,
+        )
         for row in rows
-    ]
+    ],
+)
 
 
 @router.get("/summary", response_model=APIResponse[BookingSummaryResponse])
@@ -122,7 +137,7 @@ def bookings_summary(db: Session = Depends(get_db)):
         )
     )
 
-@router.patch("/{booking_id}/status")
+@router.patch("/{booking_id}/status", response_model=APIResponse[BookingStatusResponse])
 def update_status(booking_id: int, payload: StatusUpdate, db: Session = Depends(get_db)):
     booking = db.query(Booking).filter(Booking.id == booking_id).first()
 
@@ -143,10 +158,16 @@ def update_status(booking_id: int, payload: StatusUpdate, db: Session = Depends(
     db.commit()
     db.refresh(booking)
 
-    return booking
+    return APIResponse(
+    success=True,
+    data=BookingStatusResponse(
+        booking_id=booking.id,
+        status=booking.status,
+    ),
+)
 
 
-@router.put("/reschedule")
+@router.put("/reschedule", response_model=APIResponse[RescheduleResponse])
 def reschedule_booking(
     payload: RescheduleRequest,
     db: Session = Depends(get_db),
@@ -160,15 +181,18 @@ def reschedule_booking(
         new_time=payload.service_time,
     )
 
-    return {
-        "booking_id": booking.id,
-        "new_date": booking.service_date,
-        "new_time": booking.service_time,
-        "status": booking.status,
-    }
+    return APIResponse(
+    success=True,
+    data=RescheduleResponse(
+        booking_id=booking.id,
+        new_date=booking.service_date,
+        new_time=booking.service_time,
+        status=booking.status,
+    ),
+)
 
 
-@router.patch("/{booking_id}/cancel")
+@router.patch("/{booking_id}/cancel", response_model=APIResponse[CancelResponse])
 def cancel(
     booking_id: int,
     db: Session = Depends(get_db),
@@ -177,7 +201,10 @@ def cancel(
 
     booking = cancel_booking(db=db, booking_id=booking_id)
 
-    return {
-        "booking_id": booking.id,
-        "status": booking.status,
-    }
+    return APIResponse(
+    success=True,
+    data=CancelResponse(
+        booking_id=booking.id,
+        status=booking.status,
+    ),
+)

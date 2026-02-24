@@ -22,6 +22,9 @@ from garage_agent.routes.reports import router as reports_router
 from fastapi import HTTPException
 from garage_agent.core.exceptions import http_exception_handler
 
+from garage_agent.core.domain_exceptions import DomainException
+from garage_agent.core.exceptions import domain_exception_handler
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
@@ -63,6 +66,7 @@ app.include_router(twilio_webhook.router)
 app.include_router(jobcards.router)
 app.include_router(reports_router)
 app.add_exception_handler(HTTPException, http_exception_handler)
+app.add_exception_handler(DomainException, domain_exception_handler)
 
 @app.get("/", tags=["health"])
 def root() -> dict[str, str]:
