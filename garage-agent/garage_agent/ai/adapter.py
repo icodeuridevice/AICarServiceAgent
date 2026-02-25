@@ -4,11 +4,12 @@ AI Adapter – Switch between RuleEngine and LLMEngine.
 
 import os
 
+from garage_agent.ai.base_engine import BaseEngine
 from garage_agent.ai.rule_engine import RuleEngine
 from garage_agent.ai.llm_engine import LLMEngine
 
 
-def get_ai_engine():
+def get_ai_engine() -> BaseEngine:
     engine_type = os.getenv("AI_ENGINE", "rule")
 
     if engine_type == "llm":

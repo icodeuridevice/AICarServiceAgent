@@ -10,12 +10,13 @@ Responsible for:
 import logging
 from sqlalchemy.orm import Session
 
+from garage_agent.ai.base_engine import BaseEngine
 from garage_agent.ai.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
 
 
-class LLMEngine:
+class LLMEngine(BaseEngine):
     def __init__(self):
         self.registry = ToolRegistry()
 
@@ -37,7 +38,9 @@ class LLMEngine:
                 "engine": "llm",
                 "type": "tool_call",
                 "tool": "get_daily_summary",
-                "args": {}
+                "reply": None,
+                "result": None,
+                "args": {},
             }
 
         # Example future trigger
@@ -46,17 +49,21 @@ class LLMEngine:
                 "engine": "llm",
                 "type": "tool_call",
                 "tool": "create_jobcard",
+                "reply": None,
+                "result": None,
                 "args": {
                     "booking_id": 1,
                     "technician_name": "Auto"
-                }
+                },
             }
 
         # Default conversational fallback
         return {
             "engine": "llm",
             "type": "conversation",
-            "reply": "Please provide more details so I can assist you."
+            "reply": "Please provide more details so I can assist you.",
+            "tool": None,
+            "result": None,
         }
 
     def execute_tool(self, db: Session, tool_name: str, args: dict):

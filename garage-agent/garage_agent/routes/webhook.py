@@ -128,16 +128,41 @@ async def receive_webhook(
     # ------------------------------------------------------------
    
     ai_engine = get_ai_engine()
-    ai_response = ai_engine.process(db=db, phone=phone, message=incoming_message)
+    raw_ai_response = ai_engine.process(db=db, phone=phone, message=incoming_message)
+    ai_response = raw_ai_response if isinstance(raw_ai_response, dict) else {}
+
+    if not isinstance(raw_ai_response, dict):
+        logger.warning("AI engine returned non-dict response: %r", raw_ai_response)
 
     logger.info("AI Output: %s", ai_response)
+
+    ai_response_type = ai_response.get("type")
+    if ai_response_type == "conversation":
+        ai_reply = ai_response.get("reply", "OK")
+    elif ai_response_type == "tool_call":
+        ai_reply = f"Tool executed: {ai_response.get('tool')}"
+    else:
+        ai_reply = "Request processed."
 
     # -----------------------------
     # TOOL CALL MODE
     # -----------------------------
-    if ai_response.get("type") == "tool_call":
+    if ai_response_type == "tool_call":
         tool_name = ai_response.get("tool")
-        tool_args = ai_response.get("args", {})
+        tool_args = ai_response.get("args") or {}
+
+        if not isinstance(tool_args, dict):
+            tool_args = {}
+
+        if not tool_name:
+            reply = "Tool execution failed: missing tool name."
+            twiml_response = _build_twiml_reply(reply)
+            return Response(content=twiml_response, media_type="application/xml")
+
+        if not hasattr(ai_engine, "execute_tool"):
+            reply = "Tool execution failed: engine does not support tool execution."
+            twiml_response = _build_twiml_reply(reply)
+            return Response(content=twiml_response, media_type="application/xml")
 
         try:
             result = ai_engine.execute_tool(
@@ -145,14 +170,21 @@ async def receive_webhook(
                 tool_name=tool_name,
                 args=tool_args,
             )
+            ai_response.update({"result": result})
 
-            reply = f"{tool_name} executed successfully.\nResult: {result}"
+            reply = ai_reply
+            if result is not None:
+                reply = f"{reply}\nResult: {result}"
 
         except Exception as e:
             logger.exception("Tool execution failed")
             reply = f"Tool execution failed: {str(e)}"
 
         twiml_response = _build_twiml_reply(reply)
+        return Response(content=twiml_response, media_type="application/xml")
+
+    if ai_response.get("engine") == "llm" and ai_response_type == "conversation":
+        twiml_response = _build_twiml_reply(ai_reply)
         return Response(content=twiml_response, media_type="application/xml")
 
 

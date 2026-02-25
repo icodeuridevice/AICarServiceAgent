@@ -1,23 +1,23 @@
-from garage_agent.ai.base import BaseAIEngine
-from garage_agent.services.extractor import extract_booking_details
-from garage_agent.services.conversation_service import (
-    get_state,
-    set_state,
-)
+from sqlalchemy.orm import Session
 
-class RuleEngine:
+from garage_agent.ai.base_engine import BaseEngine
+
+
+class RuleEngine(BaseEngine):
     """
     Default AI engine (rule-based).
     Future LLM engine will implement same interface.
     """
 
-    def process(self, phone: str, message: str) -> dict:
+    def process(self, db: Session, phone: str, message: str) -> dict:
         """
         Process incoming message.
         Currently returns structured metadata only.
         """
         return {
             "engine": "rule",
-            "intent": "booking_flow",
-            "confidence": 1.0,
+            "type": "conversation",
+            "reply": "Request processed.",
+            "tool": None,
+            "result": None,
         }
