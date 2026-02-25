@@ -126,66 +126,50 @@ async def receive_webhook(
     # ------------------------------------------------------------
     # AI Engine (future-proof layer)
     # ------------------------------------------------------------
-   
+
     ai_engine = get_ai_engine()
-    raw_ai_response = ai_engine.process(db=db, phone=phone, message=incoming_message)
+    selected_engine = "llm" if ai_engine.__class__.__name__ == "LLMEngine" else "rule"
+    try:
+        raw_ai_response = ai_engine.process(db=db, phone=phone, message=incoming_message)
+    except Exception as exc:
+        logger.exception("AI engine processing failed")
+        raw_ai_response = {
+            "engine": selected_engine,
+            "type": "conversation",
+            "reply": f"Request processed. (AI error: {exc})",
+            "tool": None,
+            "arguments": None,
+            "result": {"error": str(exc)},
+        }
+
     ai_response = raw_ai_response if isinstance(raw_ai_response, dict) else {}
 
     if not isinstance(raw_ai_response, dict):
         logger.warning("AI engine returned non-dict response: %r", raw_ai_response)
+        ai_response = {
+            "engine": selected_engine,
+            "type": "conversation",
+            "reply": "Request processed.",
+            "tool": None,
+            "arguments": None,
+            "result": {"error": "invalid_ai_response"},
+        }
 
     logger.info("AI Output: %s", ai_response)
 
-    ai_response_type = ai_response.get("type")
-    if ai_response_type == "conversation":
-        ai_reply = ai_response.get("reply", "OK")
-    elif ai_response_type == "tool_call":
-        ai_reply = f"Tool executed: {ai_response.get('tool')}"
-    else:
-        ai_reply = "Request processed."
-
-    # -----------------------------
-    # TOOL CALL MODE
-    # -----------------------------
-    if ai_response_type == "tool_call":
-        tool_name = ai_response.get("tool")
-        tool_args = ai_response.get("args") or {}
-
-        if not isinstance(tool_args, dict):
-            tool_args = {}
-
-        if not tool_name:
-            reply = "Tool execution failed: missing tool name."
+    if ai_response.get("engine") == "llm":
+        ai_response_type = ai_response.get("type")
+        if ai_response_type == "conversation":
+            reply = ai_response.get("reply") or "Request processed."
             twiml_response = _build_twiml_reply(reply)
             return Response(content=twiml_response, media_type="application/xml")
 
-        if not hasattr(ai_engine, "execute_tool"):
-            reply = "Tool execution failed: engine does not support tool execution."
+        if ai_response_type == "tool_call":
+            tool = ai_response.get("tool")
+            result = ai_response.get("result")
+            reply = f"Tool executed: {tool}\nResult: {result}"
             twiml_response = _build_twiml_reply(reply)
             return Response(content=twiml_response, media_type="application/xml")
-
-        try:
-            result = ai_engine.execute_tool(
-                db=db,
-                tool_name=tool_name,
-                args=tool_args,
-            )
-            ai_response.update({"result": result})
-
-            reply = ai_reply
-            if result is not None:
-                reply = f"{reply}\nResult: {result}"
-
-        except Exception as e:
-            logger.exception("Tool execution failed")
-            reply = f"Tool execution failed: {str(e)}"
-
-        twiml_response = _build_twiml_reply(reply)
-        return Response(content=twiml_response, media_type="application/xml")
-
-    if ai_response.get("engine") == "llm" and ai_response_type == "conversation":
-        twiml_response = _build_twiml_reply(ai_reply)
-        return Response(content=twiml_response, media_type="application/xml")
 
 
     # ------------------------------------------------------------
