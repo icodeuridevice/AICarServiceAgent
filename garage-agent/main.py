@@ -27,6 +27,11 @@ from garage_agent.core.exceptions import domain_exception_handler
 
 from garage_agent.core.middleware import RequestContextMiddleware
 
+from dotenv import load_dotenv
+load_dotenv()
+import os
+print("OPENAI KEY LOADED:", bool(os.getenv("OPENAI_API_KEY")))
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",

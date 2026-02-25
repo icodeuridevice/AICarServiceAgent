@@ -3,18 +3,15 @@ LLM Engine – Agentic Execution Layer.
 
 Responsible for:
 1. Understanding user intent (LLM or rule fallback)
-2. Converting registry tools to OpenAI function specs
+2. Requesting tool definitions from ToolRegistry
 3. Executing selected tools via registry
 4. Returning structured response payload
 """
 
-import inspect
 import json
 import logging
 import os
-import types
-from datetime import date, datetime, time
-from typing import Any, Union, get_args, get_origin
+from typing import Any
 
 from sqlalchemy.orm import Session
 
@@ -40,9 +37,6 @@ class LLMEngine(BaseEngine):
             "When the request requires a backend action, call the best matching tool. "
             "When information is missing, ask a short clarifying question."
         )
-
-        self._tool_specs, self._tool_param_types = self._build_openai_tool_specs()
-        self._tool_names = set(self.registry.list_tools())
 
         api_key = os.getenv("OPENAI_API_KEY")
         self.client = OpenAI(api_key=api_key) if OpenAI and api_key else None
@@ -76,7 +70,7 @@ class LLMEngine(BaseEngine):
                 model=self.model,
                 temperature=0,
                 tool_choice="auto",
-                tools=self._tool_specs,
+                tools=self.registry.get_openai_tools(),
                 messages=[
                     {"role": "system", "content": self.system_prompt},
                     {"role": "user", "content": safe_message},
@@ -110,7 +104,7 @@ class LLMEngine(BaseEngine):
             tool_name = getattr(tool_call.function, "name", None)
             raw_arguments = getattr(tool_call.function, "arguments", "{}")
             parsed_arguments = self._parse_tool_arguments(raw_arguments)
-            arguments = self._sanitize_and_coerce_arguments(tool_name, parsed_arguments)
+            arguments = self.registry.sanitize_arguments(tool_name or "", parsed_arguments)
 
             logger.info(
                 "OpenAI requested tool '%s' with arguments: %s",
@@ -151,6 +145,12 @@ class LLMEngine(BaseEngine):
             }
 
         if isinstance(response, dict):
+            response.setdefault("engine", "rule")
+            response.setdefault("type", "conversation")
+            response.setdefault("reply", "Request processed.")
+            response.setdefault("tool", None)
+            response.setdefault("arguments", None)
+            response.setdefault("result", None)
             return response
 
         logger.warning("RuleEngine fallback returned non-dict: %r", response)
@@ -188,7 +188,7 @@ class LLMEngine(BaseEngine):
             response["result"] = {"error": "missing_tool_name"}
             return response
 
-        if tool_name not in self._tool_names:
+        if not self.registry.has_tool(tool_name):
             response["reply"] = "Tool execution failed."
             response["result"] = {
                 "error": f"Tool '{tool_name}' not registered.",
@@ -215,102 +215,6 @@ class LLMEngine(BaseEngine):
 
         return response
 
-    def _build_openai_tool_specs(self) -> tuple[list[dict], dict[str, dict[str, Any]]]:
-        tool_specs: list[dict] = []
-        tool_param_types: dict[str, dict[str, Any]] = {}
-        registry_tools = getattr(self.registry, "_tools", {})
-
-        if not isinstance(registry_tools, dict):
-            logger.error("ToolRegistry internal tool map is unavailable.")
-            return tool_specs, tool_param_types
-
-        for tool_name, tool_function in registry_tools.items():
-            signature = inspect.signature(tool_function)
-            doc = (inspect.getdoc(tool_function) or "").strip()
-            description = doc.splitlines()[0] if doc else f"Execute `{tool_name}`."
-
-            properties: dict[str, dict] = {}
-            required: list[str] = []
-            param_types: dict[str, Any] = {}
-
-            for param_name, param in signature.parameters.items():
-                if param_name == "db":
-                    continue
-
-                annotation = param.annotation
-                param_types[param_name] = annotation
-                properties[param_name] = self._annotation_to_schema(
-                    param_name=param_name,
-                    annotation=annotation,
-                )
-
-                if param.default is inspect._empty:
-                    required.append(param_name)
-
-            tool_specs.append(
-                {
-                    "type": "function",
-                    "function": {
-                        "name": tool_name,
-                        "description": description,
-                        "parameters": {
-                            "type": "object",
-                            "properties": properties,
-                            "required": required,
-                            "additionalProperties": False,
-                        },
-                    },
-                }
-            )
-            tool_param_types[tool_name] = param_types
-
-        logger.info("LLMEngine registered %d OpenAI tool specs", len(tool_specs))
-        return tool_specs, tool_param_types
-
-    def _annotation_to_schema(self, param_name: str, annotation: Any) -> dict:
-        normalized_type, _ = self._normalize_annotation(annotation)
-
-        schema_type = "string"
-        if normalized_type is bool:
-            schema_type = "boolean"
-        elif normalized_type is int:
-            schema_type = "integer"
-        elif normalized_type is float:
-            schema_type = "number"
-
-        schema: dict[str, Any] = {
-            "type": schema_type,
-            "description": f"{param_name.replace('_', ' ')}",
-        }
-
-        if normalized_type is date:
-            schema["type"] = "string"
-            schema["format"] = "date"
-            schema["description"] = "Date in YYYY-MM-DD format."
-        elif normalized_type is time:
-            schema["type"] = "string"
-            schema["description"] = "Time in HH:MM format."
-        elif normalized_type is datetime:
-            schema["type"] = "string"
-            schema["format"] = "date-time"
-
-        return schema
-
-    def _normalize_annotation(self, annotation: Any) -> tuple[Any, bool]:
-        origin = get_origin(annotation)
-        if origin in (Union, types.UnionType):
-            args = get_args(annotation)
-            non_none_args = [arg for arg in args if arg is not type(None)]
-            nullable = len(non_none_args) != len(args)
-            if len(non_none_args) == 1:
-                return non_none_args[0], nullable
-            return str, nullable
-
-        if annotation in (inspect._empty, Any):
-            return str, False
-
-        return annotation, False
-
     def _parse_tool_arguments(self, raw_arguments: Any) -> dict:
         if isinstance(raw_arguments, dict):
             return raw_arguments
@@ -329,61 +233,6 @@ class LLMEngine(BaseEngine):
             return {}
 
         return parsed
-
-    def _sanitize_and_coerce_arguments(self, tool_name: str | None, arguments: dict) -> dict:
-        if not tool_name:
-            return {}
-
-        expected_params = self._tool_param_types.get(tool_name, {})
-        sanitized: dict[str, Any] = {}
-
-        for key, value in arguments.items():
-            if key not in expected_params:
-                continue
-            sanitized[key] = self._coerce_value(value=value, annotation=expected_params[key])
-
-        dropped_keys = set(arguments.keys()) - set(sanitized.keys())
-        if dropped_keys:
-            logger.warning("Dropped unsupported arguments for '%s': %s", tool_name, dropped_keys)
-
-        return sanitized
-
-    def _coerce_value(self, value: Any, annotation: Any) -> Any:
-        target_type, _ = self._normalize_annotation(annotation)
-        if value is None:
-            return None
-
-        try:
-            if target_type is bool:
-                if isinstance(value, str):
-                    lowered = value.strip().lower()
-                    if lowered in {"true", "yes", "1"}:
-                        return True
-                    if lowered in {"false", "no", "0"}:
-                        return False
-                return bool(value)
-
-            if target_type is int and not isinstance(value, int):
-                return int(value)
-
-            if target_type is float and not isinstance(value, float):
-                return float(value)
-
-            if target_type is str and not isinstance(value, str):
-                return str(value)
-
-            if target_type is date and isinstance(value, str):
-                return date.fromisoformat(value)
-
-            if target_type is time and isinstance(value, str):
-                return time.fromisoformat(value)
-
-            if target_type is datetime and isinstance(value, str):
-                return datetime.fromisoformat(value)
-        except (TypeError, ValueError):
-            logger.warning("Failed to coerce value '%s' to %s", value, target_type)
-
-        return value
 
     def execute_tool(self, db: Session, tool_name: str, args: dict):
         """Executes tool via registry safely."""
