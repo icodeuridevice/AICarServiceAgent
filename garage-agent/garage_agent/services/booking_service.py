@@ -6,7 +6,6 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from garage_agent.db.bootstrap import get_default_garage
 from garage_agent.db.models import Booking, Customer, Vehicle
 from garage_agent.intelligence.customer_health import update_customer_health
 from garage_agent.intelligence.service_prediction import calculate_next_service
@@ -29,12 +28,16 @@ ALLOWED_TRANSITIONS = {
 }
 
 
-def check_slot_conflict(db: Session, service_date: date, service_time: time) -> bool:
-    garage = get_default_garage(db)
+def check_slot_conflict(
+    db: Session,
+    garage_id: int,
+    service_date: date,
+    service_time: time,
+) -> bool:
     active_count = db.scalar(
         select(func.count(Booking.id))
         .select_from(Booking)
-        .where(Booking.garage_id == garage.id)
+        .where(Booking.garage_id == garage_id)
         .where(Booking.service_date == service_date)
         .where(Booking.service_time == service_time)
         .where(Booking.status.in_(ACTIVE_STATUSES))
@@ -43,20 +46,18 @@ def check_slot_conflict(db: Session, service_date: date, service_time: time) -> 
     return active_count >= MAX_SLOT_CAPACITY
 
 
-def get_or_create_customer_by_phone(db: Session, phone: str) -> Customer:
-    garage = get_default_garage(db)
-
+def get_or_create_customer_by_phone(db: Session, garage_id: int, phone: str) -> Customer:
     customer = db.scalar(
         select(Customer)
         .where(Customer.phone == phone)
-        .where(Customer.garage_id == garage.id)
+        .where(Customer.garage_id == garage_id)
     )
     if customer is not None:
         return customer
 
     customer = Customer(
         phone=phone,
-        garage_id=garage.id,
+        garage_id=garage_id,
     )
     db.add(customer)
     db.flush()
@@ -89,7 +90,13 @@ def _get_or_create_vehicle_for_customer(db: Session, customer_id: int, garage_id
     return vehicle
 
 
-def _apply_completion_intelligence(db: Session, booking: Booking) -> None:
+def _apply_completion_intelligence(db: Session, garage_id: int, booking: Booking) -> None:
+    if booking.garage_id != garage_id:
+        raise DomainException(
+            code=ErrorCode.BOOKING_NOT_FOUND,
+            message="Booking not found."
+        )
+
     if booking.vehicle is None:
         raise ValueError("Booking vehicle not found.")
 
@@ -97,7 +104,11 @@ def _apply_completion_intelligence(db: Session, booking: Booking) -> None:
         service_type=booking.service_type,
         service_date=booking.service_date,
     )
-    update_customer_health(db=db, customer_id=booking.vehicle.customer_id)
+    update_customer_health(
+        db=db,
+        garage_id=garage_id,
+        customer_id=booking.vehicle.customer_id,
+    )
 
 
 def _get_booking_customer_id(booking: Booking) -> int:
@@ -108,15 +119,19 @@ def _get_booking_customer_id(booking: Booking) -> int:
 
 def create_booking(
     db: Session,
+    garage_id: int,
     customer_id: int,
     service_type: str,
     service_date: date,
     service_time: time,
 ) -> Booking:
     """Create a booking when the requested slot has no active conflict."""
-    garage = get_default_garage(db)
-
-    if check_slot_conflict(db=db, service_date=service_date, service_time=service_time):
+    if check_slot_conflict(
+        db=db,
+        garage_id=garage_id,
+        service_date=service_date,
+        service_time=service_time,
+    ):
         raise DomainException(
             code=ErrorCode.SLOT_CONFLICT,
             message="Selected time slot is already booked."
@@ -126,11 +141,11 @@ def create_booking(
         vehicle = _get_or_create_vehicle_for_customer(
             db=db,
             customer_id=customer_id,
-            garage_id=garage.id,
+            garage_id=garage_id,
         )
         booking = Booking(
             vehicle_id=vehicle.id,
-            garage_id=garage.id,
+            garage_id=garage_id,
             service_type=service_type,
             service_date=service_date,
             service_time=service_time,
@@ -155,13 +170,12 @@ def create_booking(
         raise
 
 
-def update_booking_status(db: Session, booking_id: int, new_status: str) -> Booking:
+def update_booking_status(db: Session, garage_id: int, booking_id: int, new_status: str) -> Booking:
     """Update booking status when the requested transition is allowed."""
-    garage = get_default_garage(db)
     booking = db.scalar(
         select(Booking)
         .where(Booking.id == booking_id)
-        .where(Booking.garage_id == garage.id)
+        .where(Booking.garage_id == garage_id)
     )
     if booking is None:
         raise DomainException(
@@ -180,9 +194,13 @@ def update_booking_status(db: Session, booking_id: int, new_status: str) -> Book
     try:
         booking.status = new_status
         if new_status == "COMPLETED":
-            _apply_completion_intelligence(db=db, booking=booking)
+            _apply_completion_intelligence(db=db, garage_id=garage_id, booking=booking)
         elif new_status == "CANCELLED":
-            update_customer_health(db=db, customer_id=_get_booking_customer_id(booking))
+            update_customer_health(
+                db=db,
+                garage_id=garage_id,
+                customer_id=_get_booking_customer_id(booking),
+            )
 
         db.commit()
         db.refresh(booking)
@@ -194,15 +212,15 @@ def update_booking_status(db: Session, booking_id: int, new_status: str) -> Book
 
 def reschedule_booking(
     db: Session,
+    garage_id: int,
     booking_id: int,
     new_date: date,
     new_time: time,
 ) -> Booking:
-    garage = get_default_garage(db)
     booking = db.scalar(
         select(Booking)
         .where(Booking.id == booking_id)
-        .where(Booking.garage_id == garage.id)
+        .where(Booking.garage_id == garage_id)
     )
 
     if booking is None:
@@ -218,7 +236,12 @@ def reschedule_booking(
         )
 
     # Check slot conflict
-    if check_slot_conflict(db=db, service_date=new_date, service_time=new_time):
+    if check_slot_conflict(
+        db=db,
+        garage_id=garage_id,
+        service_date=new_date,
+        service_time=new_time,
+    ):
         raise DomainException(
             code=ErrorCode.SLOT_CONFLICT,
             message="Selected time slot is already booked."
@@ -245,12 +268,11 @@ def reschedule_booking(
         raise
 
 
-def cancel_booking(db: Session, booking_id: int) -> Booking:
-    garage = get_default_garage(db)
+def cancel_booking(db: Session, garage_id: int, booking_id: int) -> Booking:
     booking = db.scalar(
         select(Booking)
         .where(Booking.id == booking_id)
-        .where(Booking.garage_id == garage.id)
+        .where(Booking.garage_id == garage_id)
     )
 
     if booking is None:
@@ -274,7 +296,11 @@ def cancel_booking(db: Session, booking_id: int) -> Booking:
         booking.reminder_message_sid = None
         booking.delivery_status = None
         booking.delivered_at = None
-        update_customer_health(db=db, customer_id=_get_booking_customer_id(booking))
+        update_customer_health(
+            db=db,
+            garage_id=garage_id,
+            customer_id=_get_booking_customer_id(booking),
+        )
 
         db.commit()
         db.refresh(booking)

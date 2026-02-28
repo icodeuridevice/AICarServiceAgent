@@ -27,11 +27,12 @@ def calculate_next_service(service_type: str, service_date: date) -> date:
     return service_date + timedelta(days=interval_days)
 
 
-def get_due_vehicles(db: Session) -> list[Vehicle]:
+def get_due_vehicles(db: Session, garage_id: int) -> list[Vehicle]:
     """Return vehicles with service due in the next 3 days (inclusive)."""
     due_threshold = date.today() + timedelta(days=DUE_WINDOW_DAYS)
     return db.scalars(
         select(Vehicle)
+        .where(Vehicle.garage_id == garage_id)
         .where(Vehicle.next_service_due_date.is_not(None))
         .where(Vehicle.next_service_due_date <= due_threshold)
     ).all()

@@ -10,6 +10,7 @@ from garage_agent.services.report_service import get_daily_summary
 
 def tool_get_daily_summary(
     db: Session,
+    garage_id: int,
     target_date: date | None = None,
 ):
     """
@@ -18,5 +19,6 @@ def tool_get_daily_summary(
     """
     return get_daily_summary(
         db=db,
+        garage_id=garage_id,
         target_date=target_date or date.today(),
     )

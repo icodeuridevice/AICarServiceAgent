@@ -19,7 +19,6 @@ from sqlalchemy.orm import Session
 from garage_agent.ai.base_engine import BaseEngine
 from garage_agent.ai.rule_engine import RuleEngine
 from garage_agent.ai.tools.registry import ToolRegistry
-from garage_agent.db.bootstrap import get_default_garage
 
 try:
     from openai import OpenAI
@@ -53,7 +52,7 @@ class LLMEngine(BaseEngine):
         elif not api_key:
             logger.warning("OPENAI_API_KEY not set. Falling back to RuleEngine.")
 
-    def process(self, db: Session, phone: str, message: str) -> dict:
+    def process(self, db: Session, garage_id: int, phone: str, message: str) -> dict:
         """
         OpenAI function-calling execution path.
         """
@@ -67,22 +66,10 @@ class LLMEngine(BaseEngine):
         if self.client is None:
             return self._fallback_to_rule(
                 db=db,
+                garage_id=garage_id,
                 phone=phone,
                 message=safe_message,
                 reason="openai_client_unavailable",
-            )
-
-        try:
-            garage_id = get_default_garage(db).id
-            logger.info("Resolved garage_id=%s for LLM tool execution", garage_id)
-        except Exception as exc:
-            logger.exception("Failed to resolve default garage. Falling back to RuleEngine.")
-            return self._fallback_to_rule(
-                db=db,
-                phone=phone,
-                message=safe_message,
-                reason="garage_resolution_error",
-                error=exc,
             )
 
         try:
@@ -101,6 +88,7 @@ class LLMEngine(BaseEngine):
             logger.exception("OpenAI completion failed. Falling back to RuleEngine.")
             return self._fallback_to_rule(
                 db=db,
+                garage_id=garage_id,
                 phone=phone,
                 message=safe_message,
                 reason="openai_api_error",
@@ -113,6 +101,7 @@ class LLMEngine(BaseEngine):
             logger.warning("OpenAI response malformed. Falling back to RuleEngine.")
             return self._fallback_to_rule(
                 db=db,
+                garage_id=garage_id,
                 phone=phone,
                 message=safe_message,
                 reason="openai_malformed_response",
@@ -134,6 +123,7 @@ class LLMEngine(BaseEngine):
                 logger.warning("Tool call missing function name. Falling back to RuleEngine.")
                 return self._fallback_to_rule(
                     db=db,
+                    garage_id=garage_id,
                     phone=phone,
                     message=safe_message,
                     reason="missing_tool_name",
@@ -143,6 +133,7 @@ class LLMEngine(BaseEngine):
                 logger.warning("OpenAI requested unknown tool '%s'. Falling back to RuleEngine.", tool_name)
                 return self._fallback_to_rule(
                     db=db,
+                    garage_id=garage_id,
                     phone=phone,
                     message=safe_message,
                     reason="unknown_tool",
@@ -158,6 +149,7 @@ class LLMEngine(BaseEngine):
                 )
                 return self._fallback_to_rule(
                     db=db,
+                    garage_id=garage_id,
                     phone=phone,
                     message=safe_message,
                     reason="tool_argument_parse_error",
@@ -184,6 +176,7 @@ class LLMEngine(BaseEngine):
                 logger.exception("Tool '%s' execution failed. Falling back to RuleEngine.", tool_name)
                 return self._fallback_to_rule(
                     db=db,
+                    garage_id=garage_id,
                     phone=phone,
                     message=safe_message,
                     reason="tool_execution_error",
@@ -203,6 +196,7 @@ class LLMEngine(BaseEngine):
                 logger.exception("OpenAI follow-up generation failed. Falling back to RuleEngine.")
                 return self._fallback_to_rule(
                     db=db,
+                    garage_id=garage_id,
                     phone=phone,
                     message=safe_message,
                     reason="openai_followup_error",
@@ -224,6 +218,7 @@ class LLMEngine(BaseEngine):
     def _fallback_to_rule(
         self,
         db: Session,
+        garage_id: int,
         phone: str,
         message: str,
         reason: str,
@@ -236,7 +231,12 @@ class LLMEngine(BaseEngine):
         )
 
         try:
-            response = self.rule_engine.process(db=db, phone=phone, message=message)
+            response = self.rule_engine.process(
+                db=db,
+                garage_id=garage_id,
+                phone=phone,
+                message=message,
+            )
         except Exception as exc:
             logger.exception("RuleEngine fallback failed")
             return {
@@ -291,7 +291,7 @@ class LLMEngine(BaseEngine):
 
         return parsed
 
-    def execute_tool(self, db: Session, tool_name: str, args: dict, garage_id: int | None = None):
+    def execute_tool(self, db: Session, tool_name: str, args: dict, garage_id: int):
         """Executes tool via registry safely."""
         logger.info("Executing tool: %s with args: %s", tool_name, args)
         return self.registry.execute(

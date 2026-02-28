@@ -20,6 +20,7 @@ REPEATED_ISSUE_UPSELL: Final[str] = "comprehensive_diagnostics"
 
 def suggest_upsell_services(
     db: Session,
+    garage_id: int,
     vehicle_id: int,
     service_type: str,
 ) -> list[str]:
@@ -27,7 +28,12 @@ def suggest_upsell_services(
     normalized_service_type = service_type.strip().lower()
     suggestions = list(SERVICE_UPSELLS.get(normalized_service_type, DEFAULT_UPSELLS))
 
-    if detect_repeated_issue(db=db, vehicle_id=vehicle_id, service_type=service_type):
+    if detect_repeated_issue(
+        db=db,
+        garage_id=garage_id,
+        vehicle_id=vehicle_id,
+        service_type=service_type,
+    ):
         if REPEATED_ISSUE_UPSELL not in suggestions:
             suggestions.insert(0, REPEATED_ISSUE_UPSELL)
 

@@ -12,7 +12,12 @@ REPEATED_ISSUE_LOOKBACK_DAYS: Final[int] = 180
 REPEATED_ISSUE_THRESHOLD: Final[int] = 2
 
 
-def detect_repeated_issue(db: Session, vehicle_id: int, service_type: str) -> bool:
+def detect_repeated_issue(
+    db: Session,
+    garage_id: int,
+    vehicle_id: int,
+    service_type: str,
+) -> bool:
     """Return True if the same service occurred >= 2 times in the last 6 months."""
     service_type_normalized = service_type.strip().lower()
     today = date.today()
@@ -20,6 +25,7 @@ def detect_repeated_issue(db: Session, vehicle_id: int, service_type: str) -> bo
 
     matching_count = db.scalar(
         select(func.count(Booking.id))
+        .where(Booking.garage_id == garage_id)
         .where(Booking.vehicle_id == vehicle_id)
         .where(func.lower(Booking.service_type) == service_type_normalized)
         .where(Booking.service_date >= cutoff_date)

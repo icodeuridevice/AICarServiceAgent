@@ -120,7 +120,7 @@ class ToolRegistry:
 
         return sanitized
 
-    def execute(self, tool_name: str, db: Session, garage_id: int | None = None, **kwargs):
+    def execute(self, tool_name: str, db: Session, garage_id: int, **kwargs):
         if tool_name not in self._tools:
             raise ValueError(f"Tool '{tool_name}' not registered.")
 
@@ -128,7 +128,7 @@ class ToolRegistry:
         function_parameters = inspect.signature(tool_function).parameters
         execute_kwargs = {"db": db}
 
-        if garage_id is not None and "garage_id" in function_parameters:
+        if "garage_id" in function_parameters:
             execute_kwargs["garage_id"] = garage_id
 
         for key, value in kwargs.items():

@@ -5,6 +5,10 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, contains_eager
 
+from garage_agent.db.bootstrap import (
+    resolve_default_garage_context,
+    resolve_garage_from_phone,
+)
 from garage_agent.db.session import get_db
 from garage_agent.db.models import Booking, Customer, Vehicle
 from garage_agent.services.booking_service import update_booking_status
@@ -24,6 +28,12 @@ from garage_agent.schemas.booking import (
 router = APIRouter(prefix="/bookings", tags=["bookings"])
 
 
+def _resolve_route_garage_id(db: Session, phone: str | None = None) -> int:
+    if phone:
+        return resolve_garage_from_phone(db=db, phone=phone).garage_id
+    return resolve_default_garage_context(db=db).garage_id
+
+
 class StatusUpdate(BaseModel):
     status: str
 
@@ -41,11 +51,13 @@ def list_bookings(
     phone: str | None = None,
     db: Session = Depends(get_db),
 ):
+    garage_id = _resolve_route_garage_id(db=db, phone=phone)
     query = (
         select(Booking)
         .join(Booking.vehicle)
         .join(Vehicle.customer)
         .options(contains_eager(Booking.vehicle).contains_eager(Vehicle.customer))
+        .where(Booking.garage_id == garage_id)
     )
 
     if status is not None:
@@ -75,6 +87,7 @@ def list_bookings(
 
 @router.get("/today", response_model=APIResponse[List[TodayBookingItem]])
 def list_todays_bookings(db: Session = Depends(get_db)):
+    garage_id = _resolve_route_garage_id(db=db)
     today = date.today()
 
     rows = db.execute(
@@ -87,6 +100,7 @@ def list_todays_bookings(db: Session = Depends(get_db)):
         )
         .join(Booking.vehicle)
         .join(Vehicle.customer)
+        .where(Booking.garage_id == garage_id)
         .where(Booking.service_date == today)
         .order_by(Booking.service_time.asc())
     ).all()
@@ -108,10 +122,13 @@ def list_todays_bookings(db: Session = Depends(get_db)):
 
 @router.get("/summary", response_model=APIResponse[BookingSummaryResponse])
 def bookings_summary(db: Session = Depends(get_db)):
+    garage_id = _resolve_route_garage_id(db=db)
     counts_by_status = {status.lower(): 0 for status in ALLOWED_STATUSES}
 
     rows = db.execute(
-        select(Booking.status, func.count(Booking.id)).group_by(Booking.status)
+        select(Booking.status, func.count(Booking.id))
+        .where(Booking.garage_id == garage_id)
+        .group_by(Booking.status)
     ).all()
 
     total = 0
@@ -131,6 +148,7 @@ def bookings_summary(db: Session = Depends(get_db)):
 
 @router.patch("/{booking_id}/status", response_model=APIResponse[BookingStatusResponse])
 def update_status(booking_id: int, payload: StatusUpdate, db: Session = Depends(get_db)):
+    garage_id = _resolve_route_garage_id(db=db)
     new_status = payload.status.upper()
 
     if new_status not in ALLOWED_STATUSES:
@@ -138,6 +156,7 @@ def update_status(booking_id: int, payload: StatusUpdate, db: Session = Depends(
 
     booking = update_booking_status(
         db=db,
+        garage_id=garage_id,
         booking_id=booking_id,
         new_status=new_status,
     )
@@ -156,10 +175,12 @@ def reschedule_booking(
     payload: RescheduleRequest,
     db: Session = Depends(get_db),
 ):
+    garage_id = _resolve_route_garage_id(db=db)
     from garage_agent.services.booking_service import reschedule_booking as reschedule_engine
 
     booking = reschedule_engine(
         db=db,
+        garage_id=garage_id,
         booking_id=payload.booking_id,
         new_date=payload.service_date,
         new_time=payload.service_time,
@@ -181,9 +202,10 @@ def cancel(
     booking_id: int,
     db: Session = Depends(get_db),
 ):
+    garage_id = _resolve_route_garage_id(db=db)
     from garage_agent.services.booking_service import cancel_booking
 
-    booking = cancel_booking(db=db, booking_id=booking_id)
+    booking = cancel_booking(db=db, garage_id=garage_id, booking_id=booking_id)
 
     return APIResponse(
     success=True,

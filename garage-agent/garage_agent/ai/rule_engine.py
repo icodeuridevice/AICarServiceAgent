@@ -9,7 +9,7 @@ class RuleEngine(BaseEngine):
     Future LLM engine will implement same interface.
     """
 
-    def process(self, db: Session, phone: str, message: str) -> dict:
+    def process(self, db: Session, garage_id: int, phone: str, message: str) -> dict:
         """
         Process incoming message.
         Currently returns structured metadata only.

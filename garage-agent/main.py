@@ -57,7 +57,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 
     # Start the background reminder scheduler (non-blocking).
     try:
-        scheduler = start_scheduler()
+        scheduler = start_scheduler(garage_id=garage.id)
     except Exception:
         logger.exception("Failed to start scheduler.")
         scheduler = None

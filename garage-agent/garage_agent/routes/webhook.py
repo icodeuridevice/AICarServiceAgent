@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
+from garage_agent.db.bootstrap import resolve_garage_from_phone
 from garage_agent.db.session import get_db
 from garage_agent.services.conversation_service import (
     clear_state,
@@ -109,8 +110,15 @@ async def receive_webhook(
 
     phone = form.get("From", "").replace("whatsapp:", "")
     incoming_message = form.get("Body", "").strip()
+    garage_context = resolve_garage_from_phone(db=db, phone=phone)
+    garage_id = garage_context.garage_id
 
-    logger.info("Incoming webhook message from %s: %s", phone, incoming_message)
+    logger.info(
+        "Incoming webhook message from %s (garage_id=%s): %s",
+        phone,
+        garage_id,
+        incoming_message,
+    )
 
     # ------------------------------------------------------------
     # AI Engine (future-proof layer)
@@ -119,7 +127,12 @@ async def receive_webhook(
     ai_engine = get_ai_engine()
     selected_engine = "llm" if ai_engine.__class__.__name__ == "LLMEngine" else "rule"
     try:
-        raw_ai_response = ai_engine.process(db=db, phone=phone, message=incoming_message)
+        raw_ai_response = ai_engine.process(
+            db=db,
+            garage_id=garage_id,
+            phone=phone,
+            message=incoming_message,
+        )
     except Exception as exc:
         logger.exception("AI engine processing failed")
         raw_ai_response = {
@@ -214,10 +227,15 @@ async def receive_webhook(
         clear_state(phone)
 
         try:
-            customer = get_or_create_customer_by_phone(db=db, phone=phone)
+            customer = get_or_create_customer_by_phone(
+                db=db,
+                garage_id=garage_id,
+                phone=phone,
+            )
 
             create_booking(
                 db=db,
+                garage_id=garage_id,
                 customer_id=customer.id,
                 service_type=data.get("service_type") or "general_service",
                 service_date=parsed_date,

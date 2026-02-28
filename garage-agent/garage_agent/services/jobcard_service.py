@@ -6,7 +6,6 @@ from typing import List
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from garage_agent.db.bootstrap import get_default_garage
 from garage_agent.db.models import Booking, JobCard
 from garage_agent.intelligence.customer_health import update_customer_health
 from garage_agent.intelligence.service_prediction import calculate_next_service
@@ -16,15 +15,19 @@ def create_job_card(
     db: Session,
     booking_id: int,
     technician_name: str | None = None,
+    *,
+    garage_id: int,
 ) -> JobCard:
     """Create a job card for a booking and move booking to IN_PROGRESS."""
-    garage = get_default_garage(db)
     booking = db.scalar(
         select(Booking)
         .where(Booking.id == booking_id)
-        .where(Booking.garage_id == garage.id)
+        .where(Booking.garage_id == garage_id)
     )
     if booking is None:
+        raise ValueError("Booking not found.")
+
+    if booking.garage_id != garage_id:
         raise ValueError("Booking not found.")
 
     if booking.status in ("CANCELLED", "COMPLETED"):
@@ -35,7 +38,7 @@ def create_job_card(
 
     job = JobCard(
         booking_id=booking_id,
-        garage_id=garage.id,
+        garage_id=garage_id,
         technician_name=technician_name,
         status="IN_PROGRESS",
     )
@@ -55,13 +58,14 @@ def update_job_card(
     technician_name: str | None = None,
     work_notes: str | None = None,
     total_cost: float | None = None,
+    *,
+    garage_id: int,
 ) -> JobCard:
     """Update technician info, notes, or cost."""
-    garage = get_default_garage(db)
     job = db.scalar(
         select(JobCard)
         .where(JobCard.id == jobcard_id)
-        .where(JobCard.garage_id == garage.id)
+        .where(JobCard.garage_id == garage_id)
     )
     if job is None:
         raise ValueError("Job card not found.")
@@ -81,13 +85,12 @@ def update_job_card(
     return job
 
 
-def complete_job_card(db: Session, jobcard_id: int) -> JobCard:
+def complete_job_card(db: Session, jobcard_id: int, *, garage_id: int) -> JobCard:
     """Mark job card and booking as completed."""
-    garage = get_default_garage(db)
     job = db.scalar(
         select(JobCard)
         .where(JobCard.id == jobcard_id)
-        .where(JobCard.garage_id == garage.id)
+        .where(JobCard.garage_id == garage_id)
     )
     if job is None:
         raise ValueError("Job card not found.")
@@ -99,6 +102,9 @@ def complete_job_card(db: Session, jobcard_id: int) -> JobCard:
     job.completed_at = datetime.now(timezone.utc)
 
     booking = job.booking
+    if booking is None or booking.garage_id != garage_id:
+        raise ValueError("Booking not found.")
+
     if booking.vehicle is None:
         raise ValueError("Booking vehicle not found.")
 
@@ -107,7 +113,11 @@ def complete_job_card(db: Session, jobcard_id: int) -> JobCard:
         service_type=booking.service_type,
         service_date=booking.service_date,
     )
-    update_customer_health(db=db, customer_id=booking.vehicle.customer_id)
+    update_customer_health(
+        db=db,
+        garage_id=garage_id,
+        customer_id=booking.vehicle.customer_id,
+    )
 
     db.commit()
     db.refresh(job)
@@ -115,21 +125,19 @@ def complete_job_card(db: Session, jobcard_id: int) -> JobCard:
     return job
 
 
-def get_job_card_by_booking(db: Session, booking_id: int) -> JobCard | None:
+def get_job_card_by_booking(db: Session, booking_id: int, *, garage_id: int) -> JobCard | None:
     """Return job card for a booking."""
-    garage = get_default_garage(db)
     return db.scalar(
         select(JobCard)
         .where(JobCard.booking_id == booking_id)
-        .where(JobCard.garage_id == garage.id)
+        .where(JobCard.garage_id == garage_id)
     )
 
 
-def list_active_job_cards(db: Session) -> List[JobCard]:
+def list_active_job_cards(db: Session, *, garage_id: int) -> List[JobCard]:
     """Return all job cards currently in progress."""
-    garage = get_default_garage(db)
     return db.scalars(
         select(JobCard)
         .where(JobCard.status == "IN_PROGRESS")
-        .where(JobCard.garage_id == garage.id)
+        .where(JobCard.garage_id == garage_id)
     ).all()
