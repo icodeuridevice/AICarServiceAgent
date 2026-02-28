@@ -6,6 +6,7 @@ from typing import List
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from garage_agent.db.bootstrap import get_default_garage
 from garage_agent.db.models import Booking, JobCard
 
 
@@ -15,7 +16,12 @@ def create_job_card(
     technician_name: str | None = None,
 ) -> JobCard:
     """Create a job card for a booking and move booking to IN_PROGRESS."""
-    booking = db.get(Booking, booking_id)
+    garage = get_default_garage(db)
+    booking = db.scalar(
+        select(Booking)
+        .where(Booking.id == booking_id)
+        .where(Booking.garage_id == garage.id)
+    )
     if booking is None:
         raise ValueError("Booking not found.")
 
@@ -27,6 +33,7 @@ def create_job_card(
 
     job = JobCard(
         booking_id=booking_id,
+        garage_id=garage.id,
         technician_name=technician_name,
         status="IN_PROGRESS",
     )
@@ -48,7 +55,12 @@ def update_job_card(
     total_cost: float | None = None,
 ) -> JobCard:
     """Update technician info, notes, or cost."""
-    job = db.get(JobCard, jobcard_id)
+    garage = get_default_garage(db)
+    job = db.scalar(
+        select(JobCard)
+        .where(JobCard.id == jobcard_id)
+        .where(JobCard.garage_id == garage.id)
+    )
     if job is None:
         raise ValueError("Job card not found.")
 
@@ -69,7 +81,12 @@ def update_job_card(
 
 def complete_job_card(db: Session, jobcard_id: int) -> JobCard:
     """Mark job card and booking as completed."""
-    job = db.get(JobCard, jobcard_id)
+    garage = get_default_garage(db)
+    job = db.scalar(
+        select(JobCard)
+        .where(JobCard.id == jobcard_id)
+        .where(JobCard.garage_id == garage.id)
+    )
     if job is None:
         raise ValueError("Job card not found.")
 
@@ -90,13 +107,19 @@ def complete_job_card(db: Session, jobcard_id: int) -> JobCard:
 
 def get_job_card_by_booking(db: Session, booking_id: int) -> JobCard | None:
     """Return job card for a booking."""
+    garage = get_default_garage(db)
     return db.scalar(
-        select(JobCard).where(JobCard.booking_id == booking_id)
+        select(JobCard)
+        .where(JobCard.booking_id == booking_id)
+        .where(JobCard.garage_id == garage.id)
     )
 
 
 def list_active_job_cards(db: Session) -> List[JobCard]:
     """Return all job cards currently in progress."""
+    garage = get_default_garage(db)
     return db.scalars(
-        select(JobCard).where(JobCard.status == "IN_PROGRESS")
+        select(JobCard)
+        .where(JobCard.status == "IN_PROGRESS")
+        .where(JobCard.garage_id == garage.id)
     ).all()

@@ -6,6 +6,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from garage_agent.db.bootstrap import get_default_garage
 from garage_agent.db.models import Booking, Customer, Vehicle
 
 from garage_agent.core.domain_exceptions import DomainException
@@ -27,9 +28,11 @@ ALLOWED_TRANSITIONS = {
 
 
 def check_slot_conflict(db: Session, service_date: date, service_time: time) -> bool:
+    garage = get_default_garage(db)
     active_count = db.scalar(
         select(func.count(Booking.id))
         .select_from(Booking)
+        .where(Booking.garage_id == garage.id)
         .where(Booking.service_date == service_date)
         .where(Booking.service_time == service_time)
         .where(Booking.status.in_(ACTIVE_STATUSES))
@@ -37,17 +40,48 @@ def check_slot_conflict(db: Session, service_date: date, service_time: time) -> 
 
     return active_count >= MAX_SLOT_CAPACITY
 
-def _get_or_create_vehicle_for_customer(db: Session, customer_id: int) -> Vehicle:
+
+def get_or_create_customer_by_phone(db: Session, phone: str) -> Customer:
+    garage = get_default_garage(db)
+
+    customer = db.scalar(
+        select(Customer)
+        .where(Customer.phone == phone)
+        .where(Customer.garage_id == garage.id)
+    )
+    if customer is not None:
+        return customer
+
+    customer = Customer(
+        phone=phone,
+        garage_id=garage.id,
+    )
+    db.add(customer)
+    db.flush()
+    return customer
+
+
+def _get_or_create_vehicle_for_customer(db: Session, customer_id: int, garage_id: int) -> Vehicle:
     """Return the customer's first vehicle, creating one when missing."""
-    customer = db.scalar(select(Customer).where(Customer.id == customer_id))
+    customer = db.scalar(
+        select(Customer)
+        .where(Customer.id == customer_id)
+        .where(Customer.garage_id == garage_id)
+    )
     if customer is None:
         raise ValueError("Customer not found.")
 
     vehicle = db.scalar(
-        select(Vehicle).where(Vehicle.customer_id == customer_id).order_by(Vehicle.id.asc())
+        select(Vehicle)
+        .where(Vehicle.customer_id == customer_id)
+        .where(Vehicle.garage_id == garage_id)
+        .order_by(Vehicle.id.asc())
     )
     if vehicle is None:
-        vehicle = Vehicle(customer_id=customer_id)
+        vehicle = Vehicle(
+            customer_id=customer_id,
+            garage_id=garage_id,
+        )
         db.add(vehicle)
         db.flush()
     return vehicle
@@ -61,6 +95,8 @@ def create_booking(
     service_time: time,
 ) -> Booking:
     """Create a booking when the requested slot has no active conflict."""
+    garage = get_default_garage(db)
+
     if check_slot_conflict(db=db, service_date=service_date, service_time=service_time):
         raise DomainException(
             code=ErrorCode.SLOT_CONFLICT,
@@ -68,9 +104,14 @@ def create_booking(
         )
 
     try:
-        vehicle = _get_or_create_vehicle_for_customer(db=db, customer_id=customer_id)
+        vehicle = _get_or_create_vehicle_for_customer(
+            db=db,
+            customer_id=customer_id,
+            garage_id=garage.id,
+        )
         booking = Booking(
             vehicle_id=vehicle.id,
+            garage_id=garage.id,
             service_type=service_type,
             service_date=service_date,
             service_time=service_time,
@@ -97,7 +138,12 @@ def create_booking(
 
 def update_booking_status(db: Session, booking_id: int, new_status: str) -> Booking:
     """Update booking status when the requested transition is allowed."""
-    booking = db.scalar(select(Booking).where(Booking.id == booking_id))
+    garage = get_default_garage(db)
+    booking = db.scalar(
+        select(Booking)
+        .where(Booking.id == booking_id)
+        .where(Booking.garage_id == garage.id)
+    )
     if booking is None:
         raise DomainException(
             code=ErrorCode.BOOKING_NOT_FOUND,
@@ -128,7 +174,12 @@ def reschedule_booking(
     new_date: date,
     new_time: time,
 ) -> Booking:
-    booking = db.scalar(select(Booking).where(Booking.id == booking_id))
+    garage = get_default_garage(db)
+    booking = db.scalar(
+        select(Booking)
+        .where(Booking.id == booking_id)
+        .where(Booking.garage_id == garage.id)
+    )
 
     if booking is None:
         raise DomainException(
@@ -171,7 +222,12 @@ def reschedule_booking(
 
 
 def cancel_booking(db: Session, booking_id: int) -> Booking:
-    booking = db.scalar(select(Booking).where(Booking.id == booking_id))
+    garage = get_default_garage(db)
+    booking = db.scalar(
+        select(Booking)
+        .where(Booking.id == booking_id)
+        .where(Booking.garage_id == garage.id)
+    )
 
     if booking is None:
         raise DomainException(

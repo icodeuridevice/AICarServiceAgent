@@ -9,6 +9,29 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from garage_agent.db.session import Base
 
 
+class Garage(Base):
+    """Represents a garage (future multi-tenant support)."""
+
+    __tablename__ = "garages"
+
+    id: Mapped[int] = mapped_column(primary_key=True, index=True)
+
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+
+    phone: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    customers: Mapped[list["Customer"]] = relationship(back_populates="garage")
+    vehicles: Mapped[list["Vehicle"]] = relationship(back_populates="garage")
+    bookings: Mapped[list["Booking"]] = relationship(back_populates="garage")
+    job_cards: Mapped[list["JobCard"]] = relationship(back_populates="garage")
+
+
 class Customer(Base):
     """Represents a garage customer."""
 
@@ -29,6 +52,14 @@ class Customer(Base):
         cascade="all, delete-orphan",
     )
 
+    garage_id: Mapped[int] = mapped_column(
+        ForeignKey("garages.id"),
+        nullable=False,
+        index=True,
+    )
+
+    garage: Mapped["Garage"] = relationship(back_populates="customers")
+
 
 class Vehicle(Base):
     """Represents a vehicle owned by a customer."""
@@ -39,6 +70,11 @@ class Vehicle(Base):
 
     customer_id: Mapped[int] = mapped_column(
         ForeignKey("customers.id"),
+        nullable=False,
+        index=True,
+    )
+    garage_id: Mapped[int] = mapped_column(
+        ForeignKey("garages.id"),
         nullable=False,
         index=True,
     )
@@ -53,6 +89,7 @@ class Vehicle(Base):
     )
 
     customer: Mapped["Customer"] = relationship(back_populates="vehicles")
+    garage: Mapped["Garage"] = relationship(back_populates="vehicles")
 
     bookings: Mapped[list["Booking"]] = relationship(
         back_populates="vehicle",
@@ -69,6 +106,11 @@ class Booking(Base):
 
     vehicle_id: Mapped[int] = mapped_column(
         ForeignKey("vehicles.id"),
+        nullable=False,
+        index=True,
+    )
+    garage_id: Mapped[int] = mapped_column(
+        ForeignKey("garages.id"),
         nullable=False,
         index=True,
     )
@@ -118,6 +160,7 @@ class Booking(Base):
     )
 
     vehicle: Mapped["Vehicle"] = relationship(back_populates="bookings")
+    garage: Mapped["Garage"] = relationship(back_populates="bookings")
 
     job_card: Mapped[Optional["JobCard"]] = relationship(
         back_populates="booking",
@@ -137,6 +180,11 @@ class JobCard(Base):
         ForeignKey("bookings.id"),
         nullable=False,
         unique=True,
+        index=True,
+    )
+    garage_id: Mapped[int] = mapped_column(
+        ForeignKey("garages.id"),
+        nullable=False,
         index=True,
     )
 
@@ -165,3 +213,4 @@ class JobCard(Base):
     )
 
     booking: Mapped["Booking"] = relationship(back_populates="job_card")
+    garage: Mapped["Garage"] = relationship(back_populates="job_cards")

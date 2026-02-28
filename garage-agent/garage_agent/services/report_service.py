@@ -4,6 +4,7 @@ from datetime import date
 from sqlalchemy import select, func
 from sqlalchemy.orm import Session
 
+from garage_agent.db.bootstrap import get_default_garage
 from garage_agent.db.models import Booking, JobCard
 
 
@@ -14,11 +15,13 @@ def get_daily_summary(
     """Return operational summary for a given date."""
     if target_date is None:
         target_date = date.today()
+    garage = get_default_garage(db)
 
     # Total bookings for the day
     total_bookings = db.scalar(
         select(func.count())
         .select_from(Booking)
+        .where(Booking.garage_id == garage.id)
         .where(Booking.service_date == target_date)
     ) or 0
 
@@ -27,6 +30,7 @@ def get_daily_summary(
         select(func.count())
         .select_from(Booking)
         .where(
+            Booking.garage_id == garage.id,
             Booking.service_date == target_date,
             Booking.status == "CANCELLED",
         )
@@ -36,6 +40,7 @@ def get_daily_summary(
     in_progress_jobs = db.scalar(
         select(func.count())
         .select_from(JobCard)
+        .where(JobCard.garage_id == garage.id)
         .where(JobCard.status == "IN_PROGRESS")
     ) or 0
 
@@ -44,6 +49,7 @@ def get_daily_summary(
         select(func.count())
         .select_from(JobCard)
         .where(
+            JobCard.garage_id == garage.id,
             JobCard.status == "COMPLETED",
             func.date(JobCard.completed_at) == target_date,
         )
@@ -53,6 +59,7 @@ def get_daily_summary(
     total_revenue = db.scalar(
         select(func.sum(JobCard.total_cost))
         .where(
+            JobCard.garage_id == garage.id,
             JobCard.status == "COMPLETED",
             JobCard.completed_at.is_not(None),
             func.date(JobCard.completed_at) == target_date,

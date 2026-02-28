@@ -10,10 +10,8 @@ from xml.sax.saxutils import escape
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import Response
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from garage_agent.db.models import Customer
 from garage_agent.db.session import get_db
 from garage_agent.services.conversation_service import (
     clear_state,
@@ -22,7 +20,7 @@ from garage_agent.services.conversation_service import (
     set_state,
     update_data,
 )
-from garage_agent.services.booking_service import create_booking
+from garage_agent.services.booking_service import create_booking, get_or_create_customer_by_phone
 from garage_agent.services.extractor import extract_booking_details
 from garage_agent.ai.adapter import get_ai_engine
 
@@ -91,15 +89,6 @@ def _parse_service_time(raw_time: str | None) -> time | None:
             continue
 
     return None
-
-
-def _get_or_create_customer(db: Session, phone: str) -> Customer:
-    customer = db.scalar(select(Customer).where(Customer.phone == phone))
-    if customer is None:
-        customer = Customer(phone=phone)
-        db.add(customer)
-        db.flush()
-    return customer
 
 
 # -------------------------------------------------------------------
@@ -234,7 +223,7 @@ async def receive_webhook(
         clear_state(phone)
 
         try:
-            customer = _get_or_create_customer(db=db, phone=phone)
+            customer = get_or_create_customer_by_phone(db=db, phone=phone)
 
             create_booking(
                 db=db,

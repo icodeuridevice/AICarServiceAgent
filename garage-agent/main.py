@@ -14,6 +14,8 @@ from collections.abc import AsyncIterator
 from fastapi import FastAPI
 
 from garage_agent.db.init_db import init_db
+from garage_agent.db.bootstrap import get_default_garage
+from garage_agent.db.session import SessionLocal
 from garage_agent.scheduler.reminder_scheduler import start_scheduler
 from garage_agent.routes import webhook, bookings, twilio_webhook
 from garage_agent.routes import jobcards
@@ -45,6 +47,13 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # Ensure SQL tables exist at app startup.
     init_db()
     logger.info("Database tables initialized.")
+
+    db = SessionLocal()
+    try:
+        garage = get_default_garage(db)
+        logger.info("Default garage ready (id=%s, name=%s).", garage.id, garage.name)
+    finally:
+        db.close()
 
     # Start the background reminder scheduler (non-blocking).
     try:
