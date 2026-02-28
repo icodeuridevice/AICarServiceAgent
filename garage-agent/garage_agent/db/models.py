@@ -9,9 +9,11 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    ForeignKeyConstraint,
     Integer,
     String,
     Time,
+    UniqueConstraint,
     func,
     text,
 )
@@ -21,7 +23,7 @@ from garage_agent.db.session import Base
 
 
 class Garage(Base):
-    """Represents a garage (future multi-tenant support)."""
+    """Represents a tenant garage."""
 
     __tablename__ = "garages"
 
@@ -30,7 +32,12 @@ class Garage(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
 
     phone: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    whatsapp_number: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    whatsapp_number: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -39,19 +46,32 @@ class Garage(Base):
     )
 
     customers: Mapped[list["Customer"]] = relationship(back_populates="garage")
-    vehicles: Mapped[list["Vehicle"]] = relationship(back_populates="garage")
-    bookings: Mapped[list["Booking"]] = relationship(back_populates="garage")
-    job_cards: Mapped[list["JobCard"]] = relationship(back_populates="garage")
+    vehicles: Mapped[list["Vehicle"]] = relationship(
+        back_populates="garage",
+        overlaps="customer,vehicles",
+    )
+    bookings: Mapped[list["Booking"]] = relationship(
+        back_populates="garage",
+        overlaps="bookings,vehicle",
+    )
+    job_cards: Mapped[list["JobCard"]] = relationship(
+        back_populates="garage",
+        overlaps="booking,job_card",
+    )
 
 
 class Customer(Base):
     """Represents a garage customer."""
 
     __tablename__ = "customers"
+    __table_args__ = (
+        UniqueConstraint("garage_id", "phone", name="uq_customers_garage_phone"),
+        UniqueConstraint("id", "garage_id", name="uq_customers_id_garage"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True, index=True)
     name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    phone: Mapped[str] = mapped_column(String(32), unique=True, index=True, nullable=False)
+    phone: Mapped[str] = mapped_column(String(32), index=True, nullable=False)
     health_score: Mapped[int] = mapped_column(
         Integer,
         nullable=False,
@@ -68,6 +88,7 @@ class Customer(Base):
     vehicles: Mapped[list["Vehicle"]] = relationship(
         back_populates="customer",
         cascade="all, delete-orphan",
+        overlaps="garage,vehicles",
     )
 
     garage_id: Mapped[int] = mapped_column(
@@ -83,11 +104,19 @@ class Vehicle(Base):
     """Represents a vehicle owned by a customer."""
 
     __tablename__ = "vehicles"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["customer_id", "garage_id"],
+            ["customers.id", "customers.garage_id"],
+            name="fk_vehicles_customer_garage",
+        ),
+        UniqueConstraint("id", "garage_id", name="uq_vehicles_id_garage"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True, index=True)
 
     customer_id: Mapped[int] = mapped_column(
-        ForeignKey("customers.id"),
+        Integer,
         nullable=False,
         index=True,
     )
@@ -107,12 +136,19 @@ class Vehicle(Base):
         server_default=func.now(),
     )
 
-    customer: Mapped["Customer"] = relationship(back_populates="vehicles")
-    garage: Mapped["Garage"] = relationship(back_populates="vehicles")
+    customer: Mapped["Customer"] = relationship(
+        back_populates="vehicles",
+        overlaps="garage,vehicles",
+    )
+    garage: Mapped["Garage"] = relationship(
+        back_populates="vehicles",
+        overlaps="customer,vehicles",
+    )
 
     bookings: Mapped[list["Booking"]] = relationship(
         back_populates="vehicle",
         cascade="all, delete-orphan",
+        overlaps="garage,bookings",
     )
 
 
@@ -120,11 +156,19 @@ class Booking(Base):
     """Represents a service booking for a specific vehicle."""
 
     __tablename__ = "bookings"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["vehicle_id", "garage_id"],
+            ["vehicles.id", "vehicles.garage_id"],
+            name="fk_bookings_vehicle_garage",
+        ),
+        UniqueConstraint("id", "garage_id", name="uq_bookings_id_garage"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True, index=True)
 
     vehicle_id: Mapped[int] = mapped_column(
-        ForeignKey("vehicles.id"),
+        Integer,
         nullable=False,
         index=True,
     )
@@ -178,13 +222,20 @@ class Booking(Base):
         nullable=True,
     )
 
-    vehicle: Mapped["Vehicle"] = relationship(back_populates="bookings")
-    garage: Mapped["Garage"] = relationship(back_populates="bookings")
+    vehicle: Mapped["Vehicle"] = relationship(
+        back_populates="bookings",
+        overlaps="garage,bookings",
+    )
+    garage: Mapped["Garage"] = relationship(
+        back_populates="bookings",
+        overlaps="bookings,vehicle",
+    )
 
     job_card: Mapped[Optional["JobCard"]] = relationship(
         back_populates="booking",
         uselist=False,
         cascade="all, delete-orphan",
+        overlaps="garage,job_cards",
     )
 
 
@@ -192,11 +243,19 @@ class JobCard(Base):
     """Represents actual service execution for a booking."""
 
     __tablename__ = "job_cards"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["booking_id", "garage_id"],
+            ["bookings.id", "bookings.garage_id"],
+            name="fk_job_cards_booking_garage",
+        ),
+        UniqueConstraint("id", "garage_id", name="uq_job_cards_id_garage"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True, index=True)
 
     booking_id: Mapped[int] = mapped_column(
-        ForeignKey("bookings.id"),
+        Integer,
         nullable=False,
         unique=True,
         index=True,
@@ -231,5 +290,11 @@ class JobCard(Base):
         server_default=text("'IN_PROGRESS'"),
     )
 
-    booking: Mapped["Booking"] = relationship(back_populates="job_card")
-    garage: Mapped["Garage"] = relationship(back_populates="job_cards")
+    booking: Mapped["Booking"] = relationship(
+        back_populates="job_card",
+        overlaps="garage,job_cards",
+    )
+    garage: Mapped["Garage"] = relationship(
+        back_populates="job_cards",
+        overlaps="booking,job_card",
+    )
