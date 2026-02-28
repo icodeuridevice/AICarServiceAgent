@@ -147,18 +147,9 @@ async def receive_webhook(
     logger.info("AI Output: %s", ai_response)
 
     if ai_response.get("engine") == "llm":
-        ai_response_type = ai_response.get("type")
-        if ai_response_type == "conversation":
-            reply = ai_response.get("reply") or "Request processed."
-            twiml_response = _build_twiml_reply(reply)
-            return Response(content=twiml_response, media_type="application/xml")
-
-        if ai_response_type == "tool_call":
-            tool = ai_response.get("tool")
-            result = ai_response.get("result")
-            reply = f"Tool executed: {tool}\nResult: {result}"
-            twiml_response = _build_twiml_reply(reply)
-            return Response(content=twiml_response, media_type="application/xml")
+        reply = ai_response.get("reply") or "Request processed."
+        twiml_response = _build_twiml_reply(reply)
+        return Response(content=twiml_response, media_type="application/xml")
 
 
     # ------------------------------------------------------------

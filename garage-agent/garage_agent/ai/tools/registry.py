@@ -57,7 +57,33 @@ class ToolRegistry:
             "get_daily_summary": "Get daily bookings and revenue summary.",
         }
 
-        self._openai_tools, self._tool_param_types = self._build_openai_tools()
+        self._tool_param_types = {
+            "create_booking": {
+                "customer_id": int,
+                "service_type": str,
+                "service_date": date,
+                "service_time": time,
+            },
+            "reschedule_booking": {
+                "booking_id": int,
+                "new_date": date,
+                "new_time": time,
+            },
+            "cancel_booking": {
+                "booking_id": int,
+            },
+            "create_jobcard": {
+                "booking_id": int,
+                "technician_name": str | None,
+            },
+            "complete_jobcard": {
+                "jobcard_id": int,
+            },
+            "get_daily_summary": {
+                "target_date": date | None,
+            },
+        }
+        self._openai_tool_definitions = self._build_openai_tool_definitions()
 
     def list_tools(self):
         return list(self._tools.keys())
@@ -65,8 +91,12 @@ class ToolRegistry:
     def has_tool(self, tool_name: str) -> bool:
         return tool_name in self._tools
 
+    def get_openai_tool_definitions(self) -> list[dict]:
+        return copy.deepcopy(self._openai_tool_definitions)
+
     def get_openai_tools(self) -> list[dict]:
-        return copy.deepcopy(self._openai_tools)
+        # Backward compatibility for older callers.
+        return self.get_openai_tool_definitions()
 
     def sanitize_arguments(self, tool_name: str, arguments: dict[str, Any] | None) -> dict[str, Any]:
         if not tool_name or not isinstance(arguments, dict):
@@ -90,57 +120,178 @@ class ToolRegistry:
 
         return sanitized
 
-    def execute(self, tool_name: str, db: Session, **kwargs):
+    def execute(self, tool_name: str, db: Session, garage_id: int | None = None, **kwargs):
         if tool_name not in self._tools:
             raise ValueError(f"Tool '{tool_name}' not registered.")
 
         tool_function = self._tools[tool_name]
-        return tool_function(db=db, **kwargs)
+        function_parameters = inspect.signature(tool_function).parameters
+        execute_kwargs = {"db": db}
 
-    def _build_openai_tools(self) -> tuple[list[dict], dict[str, dict[str, Any]]]:
-        openai_tools: list[dict] = []
-        tool_param_types: dict[str, dict[str, Any]] = {}
+        if garage_id is not None and "garage_id" in function_parameters:
+            execute_kwargs["garage_id"] = garage_id
 
-        for tool_name, tool_function in self._tools.items():
-            signature = inspect.signature(tool_function)
-            description = self._get_tool_description(tool_name, tool_function)
-
-            properties: dict[str, dict] = {}
-            required: list[str] = []
-            param_types: dict[str, Any] = {}
-
-            for param_name, param in signature.parameters.items():
-                if param_name == "db":
-                    continue
-
-                annotation = param.annotation
-                param_types[param_name] = annotation
-                properties[param_name] = self._annotation_to_schema(
-                    param_name=param_name,
-                    annotation=annotation,
+        for key, value in kwargs.items():
+            if key in function_parameters and key != "db":
+                execute_kwargs[key] = value
+            else:
+                logger.warning(
+                    "Ignoring unsupported execute kwarg for '%s': %s",
+                    tool_name,
+                    key,
                 )
 
-                if param.default is inspect._empty:
-                    required.append(param_name)
+        return tool_function(**execute_kwargs)
 
-            openai_tools.append(
-                {
-                    "type": "function",
-                    "function": {
-                        "name": tool_name,
-                        "description": description,
-                        "parameters": {
-                            "type": "object",
-                            "properties": properties,
-                            "required": required,
+    def _build_openai_tool_definitions(self) -> list[dict]:
+        tool_definitions = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "create_booking",
+                    "description": self._tool_descriptions["create_booking"],
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "customer_id": {
+                                "type": "integer",
+                                "description": "Customer ID for booking.",
+                            },
+                            "service_type": {
+                                "type": "string",
+                                "description": "Type of requested service.",
+                            },
+                            "service_date": {
+                                "type": "string",
+                                "format": "date",
+                                "description": "Service date in YYYY-MM-DD format.",
+                            },
+                            "service_time": {
+                                "type": "string",
+                                "description": "Service time in HH:MM format (24-hour).",
+                            },
                         },
+                        "required": [
+                            "customer_id",
+                            "service_type",
+                            "service_date",
+                            "service_time",
+                        ],
+                        "additionalProperties": False,
                     },
-                }
-            )
-            tool_param_types[tool_name] = param_types
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "reschedule_booking",
+                    "description": self._tool_descriptions["reschedule_booking"],
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "booking_id": {
+                                "type": "integer",
+                                "description": "Booking ID to reschedule.",
+                            },
+                            "new_date": {
+                                "type": "string",
+                                "format": "date",
+                                "description": "New service date in YYYY-MM-DD format.",
+                            },
+                            "new_time": {
+                                "type": "string",
+                                "description": "New service time in HH:MM format (24-hour).",
+                            },
+                        },
+                        "required": ["booking_id", "new_date", "new_time"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "cancel_booking",
+                    "description": self._tool_descriptions["cancel_booking"],
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "booking_id": {
+                                "type": "integer",
+                                "description": "Booking ID to cancel.",
+                            },
+                        },
+                        "required": ["booking_id"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "create_jobcard",
+                    "description": self._tool_descriptions["create_jobcard"],
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "booking_id": {
+                                "type": "integer",
+                                "description": "Booking ID to start work for.",
+                            },
+                            "technician_name": {
+                                "type": "string",
+                                "description": "Technician assigned to the job.",
+                            },
+                        },
+                        "required": ["booking_id"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "complete_jobcard",
+                    "description": self._tool_descriptions["complete_jobcard"],
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "jobcard_id": {
+                                "type": "integer",
+                                "description": "Job card ID to complete.",
+                            },
+                        },
+                        "required": ["jobcard_id"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_daily_summary",
+                    "description": self._tool_descriptions["get_daily_summary"],
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "target_date": {
+                                "type": "string",
+                                "format": "date",
+                                "description": "Date in YYYY-MM-DD format. Defaults to today.",
+                            },
+                        },
+                        "required": [],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+        ]
 
-        logger.info("ToolRegistry generated %d OpenAI tool definitions", len(openai_tools))
-        return openai_tools, tool_param_types
+        logger.info(
+            "ToolRegistry generated %d OpenAI tool definitions",
+            len(tool_definitions),
+        )
+        return tool_definitions
 
     def _get_tool_description(self, tool_name: str, tool_function: Any) -> str:
         configured = self._tool_descriptions.get(tool_name)
