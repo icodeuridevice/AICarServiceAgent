@@ -3,7 +3,18 @@
 from datetime import date, datetime, time
 from typing import Optional
 
-from sqlalchemy import Boolean, Date, DateTime, ForeignKey, String, Time, Float, func, text
+from sqlalchemy import (
+    Boolean,
+    Date,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Time,
+    func,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from garage_agent.db.session import Base
@@ -41,6 +52,12 @@ class Customer(Base):
     id: Mapped[int] = mapped_column(primary_key=True, index=True)
     name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     phone: Mapped[str] = mapped_column(String(32), unique=True, index=True, nullable=False)
+    health_score: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -82,6 +99,7 @@ class Vehicle(Base):
 
     vehicle_number: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     vehicle_model: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    next_service_due_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

@@ -8,6 +8,8 @@ from sqlalchemy.orm import Session
 
 from garage_agent.db.bootstrap import get_default_garage
 from garage_agent.db.models import Booking, JobCard
+from garage_agent.intelligence.customer_health import update_customer_health
+from garage_agent.intelligence.service_prediction import calculate_next_service
 
 
 def create_job_card(
@@ -97,7 +99,15 @@ def complete_job_card(db: Session, jobcard_id: int) -> JobCard:
     job.completed_at = datetime.now(timezone.utc)
 
     booking = job.booking
+    if booking.vehicle is None:
+        raise ValueError("Booking vehicle not found.")
+
     booking.status = "COMPLETED"
+    booking.vehicle.next_service_due_date = calculate_next_service(
+        service_type=booking.service_type,
+        service_date=booking.service_date,
+    )
+    update_customer_health(db=db, customer_id=booking.vehicle.customer_id)
 
     db.commit()
     db.refresh(job)

@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session, contains_eager
 
 from garage_agent.db.session import get_db
 from garage_agent.db.models import Booking, Customer, Vehicle
+from garage_agent.services.booking_service import update_booking_status
 
 from garage_agent.schemas.common import APIResponse
 from garage_agent.schemas.booking import BookingSummaryResponse
@@ -32,15 +33,6 @@ class RescheduleRequest(BaseModel):
     service_time: time
 
 ALLOWED_STATUSES = ["PENDING", "CONFIRMED", "IN_PROGRESS", "COMPLETED", "CANCELLED"]
-
-VALID_TRANSITIONS = {
-    "PENDING": ["CONFIRMED", "CANCELLED"],
-    "CONFIRMED": ["IN_PROGRESS", "CANCELLED"],
-    "IN_PROGRESS": ["COMPLETED"],
-    "COMPLETED": [],
-    "CANCELLED": [],
-}
-
 
 @router.get("/", response_model=APIResponse[List[BookingListItem]])
 def list_bookings(
@@ -139,24 +131,16 @@ def bookings_summary(db: Session = Depends(get_db)):
 
 @router.patch("/{booking_id}/status", response_model=APIResponse[BookingStatusResponse])
 def update_status(booking_id: int, payload: StatusUpdate, db: Session = Depends(get_db)):
-    booking = db.query(Booking).filter(Booking.id == booking_id).first()
-
-    if not booking:
-        raise HTTPException(status_code=404, detail="Booking not found")
-
     new_status = payload.status.upper()
 
     if new_status not in ALLOWED_STATUSES:
         raise HTTPException(status_code=400, detail="Invalid status")
 
-    current_status = booking.status
-
-    if new_status not in VALID_TRANSITIONS.get(current_status, []):
-        raise HTTPException(status_code=400, detail="Invalid status transition")
-
-    booking.status = new_status
-    db.commit()
-    db.refresh(booking)
+    booking = update_booking_status(
+        db=db,
+        booking_id=booking_id,
+        new_status=new_status,
+    )
 
     return APIResponse(
     success=True,

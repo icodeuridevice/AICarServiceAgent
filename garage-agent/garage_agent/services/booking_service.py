@@ -8,6 +8,8 @@ from sqlalchemy.orm import Session
 
 from garage_agent.db.bootstrap import get_default_garage
 from garage_agent.db.models import Booking, Customer, Vehicle
+from garage_agent.intelligence.customer_health import update_customer_health
+from garage_agent.intelligence.service_prediction import calculate_next_service
 
 from garage_agent.core.domain_exceptions import DomainException
 from garage_agent.core.error_codes import ErrorCode
@@ -87,6 +89,23 @@ def _get_or_create_vehicle_for_customer(db: Session, customer_id: int, garage_id
     return vehicle
 
 
+def _apply_completion_intelligence(db: Session, booking: Booking) -> None:
+    if booking.vehicle is None:
+        raise ValueError("Booking vehicle not found.")
+
+    booking.vehicle.next_service_due_date = calculate_next_service(
+        service_type=booking.service_type,
+        service_date=booking.service_date,
+    )
+    update_customer_health(db=db, customer_id=booking.vehicle.customer_id)
+
+
+def _get_booking_customer_id(booking: Booking) -> int:
+    if booking.vehicle is None:
+        raise ValueError("Booking vehicle not found.")
+    return booking.vehicle.customer_id
+
+
 def create_booking(
     db: Session,
     customer_id: int,
@@ -160,6 +179,11 @@ def update_booking_status(db: Session, booking_id: int, new_status: str) -> Book
 
     try:
         booking.status = new_status
+        if new_status == "COMPLETED":
+            _apply_completion_intelligence(db=db, booking=booking)
+        elif new_status == "CANCELLED":
+            update_customer_health(db=db, customer_id=_get_booking_customer_id(booking))
+
         db.commit()
         db.refresh(booking)
         return booking
@@ -250,6 +274,7 @@ def cancel_booking(db: Session, booking_id: int) -> Booking:
         booking.reminder_message_sid = None
         booking.delivery_status = None
         booking.delivered_at = None
+        update_customer_health(db=db, customer_id=_get_booking_customer_id(booking))
 
         db.commit()
         db.refresh(booking)
