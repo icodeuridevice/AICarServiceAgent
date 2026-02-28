@@ -112,6 +112,7 @@ async def receive_webhook(
     incoming_message = form.get("Body", "").strip()
     garage_context = resolve_garage_from_phone(db=db, phone=phone)
     garage_id = garage_context.garage_id
+    request.state.garage_id = garage_id
 
     logger.info(
         "Incoming webhook message from %s (garage_id=%s): %s",

@@ -43,6 +43,7 @@ class LLMEngine(BaseEngine):
             "Write a concise, customer-friendly WhatsApp reply using the tool result. "
             "Do not mention internal implementation details."
         )
+        self.tool_execution_failure_reply = "I couldn't complete that request. Please try again."
 
         api_key = os.getenv("OPENAI_API_KEY")
         self.client = OpenAI(api_key=api_key) if OpenAI and api_key else None
@@ -58,7 +59,11 @@ class LLMEngine(BaseEngine):
         """
 
         safe_message = (message or "").strip()
-        logger.info("LLMEngine processing message from %s", phone)
+        logger.info(
+            "event=process_start engine=llm phone=%s garage_id=%s",
+            phone,
+            garage_id,
+        )
 
         if not safe_message:
             return self._conversation_response("Please provide more details so I can assist you.")
@@ -73,7 +78,7 @@ class LLMEngine(BaseEngine):
             )
 
         try:
-            logger.info("Calling OpenAI for initial tool-choice pass")
+            logger.info("event=model_call phase=start model=%s", self.model)
             completion = self.client.chat.completions.create(
                 model=self.model,
                 temperature=0,
@@ -84,8 +89,9 @@ class LLMEngine(BaseEngine):
                     {"role": "user", "content": safe_message},
                 ],
             )
+            logger.info("event=model_call phase=success model=%s", self.model)
         except Exception as exc:
-            logger.exception("OpenAI completion failed. Falling back to RuleEngine.")
+            logger.exception("event=model_call phase=error model=%s", self.model)
             return self._fallback_to_rule(
                 db=db,
                 garage_id=garage_id,
@@ -98,7 +104,7 @@ class LLMEngine(BaseEngine):
         try:
             message_obj = completion.choices[0].message
         except Exception as exc:
-            logger.warning("OpenAI response malformed. Falling back to RuleEngine.")
+            logger.warning("event=model_call phase=malformed_response model=%s", self.model)
             return self._fallback_to_rule(
                 db=db,
                 garage_id=garage_id,
@@ -113,14 +119,9 @@ class LLMEngine(BaseEngine):
             tool_call = tool_calls[0]
             tool_name = getattr(tool_call.function, "name", None)
             raw_arguments = getattr(tool_call.function, "arguments", "{}")
-            logger.info(
-                "OpenAI requested tool '%s' with raw arguments: %s",
-                tool_name,
-                raw_arguments,
-            )
 
             if not tool_name:
-                logger.warning("Tool call missing function name. Falling back to RuleEngine.")
+                logger.warning("event=tool_decision decision=missing_tool_name")
                 return self._fallback_to_rule(
                     db=db,
                     garage_id=garage_id,
@@ -130,7 +131,7 @@ class LLMEngine(BaseEngine):
                 )
 
             if not self.registry.has_tool(tool_name):
-                logger.warning("OpenAI requested unknown tool '%s'. Falling back to RuleEngine.", tool_name)
+                logger.warning("event=tool_decision decision=unknown_tool tool=%s", tool_name)
                 return self._fallback_to_rule(
                     db=db,
                     garage_id=garage_id,
@@ -142,11 +143,7 @@ class LLMEngine(BaseEngine):
             try:
                 parsed_arguments = self._parse_tool_arguments(raw_arguments)
             except ValueError as exc:
-                logger.warning(
-                    "Tool argument parse failed for '%s': %s. Falling back to RuleEngine.",
-                    tool_name,
-                    str(exc),
-                )
+                logger.warning("event=tool_decision decision=argument_parse_error tool=%s", tool_name)
                 return self._fallback_to_rule(
                     db=db,
                     garage_id=garage_id,
@@ -157,43 +154,58 @@ class LLMEngine(BaseEngine):
                 )
 
             arguments = self.registry.sanitize_arguments(tool_name, parsed_arguments)
-
             logger.info(
-                "Sanitized arguments for tool '%s': %s",
+                "event=tool_decision decision=tool_selected tool=%s argument_keys=%s",
                 tool_name,
-                arguments,
+                sorted(arguments.keys()),
             )
 
+            logger.info("event=tool_execution phase=start tool=%s", tool_name)
             try:
-                tool_result = self.registry.execute(
+                tool_execution = self.registry.execute(
                     tool_name=tool_name,
                     db=db,
                     garage_id=garage_id,
                     **arguments,
                 )
-                logger.info("Tool '%s' executed successfully", tool_name)
-            except Exception as exc:
-                logger.exception("Tool '%s' execution failed. Falling back to RuleEngine.", tool_name)
-                return self._fallback_to_rule(
-                    db=db,
-                    garage_id=garage_id,
-                    phone=phone,
-                    message=safe_message,
-                    reason="tool_execution_error",
-                    error=exc,
-                )
+            except Exception:
+                logger.exception("event=tool_execution phase=error tool=%s", tool_name)
+                return self._tool_execution_failure_response()
 
-            serialized_result = self._make_json_safe(tool_result)
+            if not isinstance(tool_execution, dict):
+                logger.warning(
+                    "event=tool_execution phase=invalid_response tool=%s response_type=%s",
+                    tool_name,
+                    type(tool_execution).__name__,
+                )
+                return self._tool_execution_failure_response()
+
+            execution_success = bool(tool_execution.get("success"))
+            logger.info(
+                "event=tool_execution phase=finish tool=%s success=%s",
+                tool_name,
+                execution_success,
+            )
+            if not execution_success:
+                logger.warning(
+                    "event=tool_execution phase=failed tool=%s error=%s",
+                    tool_name,
+                    tool_execution.get("error"),
+                )
+                return self._tool_execution_failure_response()
+
+            serialized_result = self._make_json_safe(tool_execution.get("data"))
 
             try:
-                logger.info("Calling OpenAI for final customer-facing response synthesis")
+                logger.info("event=model_call phase=followup_start model=%s tool=%s", self.model, tool_name)
                 final_reply = self._generate_tool_followup_reply(
                     user_message=safe_message,
                     tool_name=tool_name,
                     tool_result=serialized_result,
                 )
+                logger.info("event=model_call phase=followup_success model=%s tool=%s", self.model, tool_name)
             except Exception as exc:
-                logger.exception("OpenAI follow-up generation failed. Falling back to RuleEngine.")
+                logger.exception("event=model_call phase=followup_error model=%s tool=%s", self.model, tool_name)
                 return self._fallback_to_rule(
                     db=db,
                     garage_id=garage_id,
@@ -203,15 +215,16 @@ class LLMEngine(BaseEngine):
                     error=exc,
                 )
 
-            return {
-                "engine": "llm",
-                "type": "tool_call",
-                "tool": tool_name,
-                "result": serialized_result,
-                "reply": final_reply,
-            }
+            return self._response_contract(
+                engine="llm",
+                response_type="tool_call",
+                reply=final_reply,
+                tool=tool_name,
+                arguments=arguments,
+                result=serialized_result,
+            )
 
-        logger.info("No tool call requested by OpenAI; returning direct conversation response")
+        logger.info("event=tool_decision decision=conversation")
         reply = self._extract_message_text(message_obj) or "Request processed."
         return self._conversation_response(reply)
 
@@ -225,7 +238,7 @@ class LLMEngine(BaseEngine):
         error: Exception | None = None,
     ) -> dict:
         logger.warning(
-            "LLMEngine fallback to RuleEngine triggered. reason=%s error=%s",
+            "event=fallback_trigger reason=%s error=%s",
             reason,
             str(error) if error else None,
         )
@@ -237,40 +250,95 @@ class LLMEngine(BaseEngine):
                 phone=phone,
                 message=message,
             )
-        except Exception as exc:
-            logger.exception("RuleEngine fallback failed")
-            return {
-                "engine": "rule",
-                "type": "conversation",
-                "reply": "Request processed.",
-                "tool": None,
-                "result": {"error": str(exc), "fallback_reason": reason},
-            }
+        except Exception:
+            logger.exception("event=fallback_trigger reason=%s phase=rule_engine_error", reason)
+            return self._response_contract(
+                engine="rule",
+                response_type="conversation",
+                reply=self.tool_execution_failure_reply,
+                tool=None,
+                arguments=None,
+                result=None,
+            )
 
-        if isinstance(response, dict):
-            response.setdefault("engine", "rule")
-            response.setdefault("type", "conversation")
-            response.setdefault("reply", "Request processed.")
-            response.setdefault("tool", None)
-            response.setdefault("result", None)
-            return response
+        return self._normalize_rule_response(response)
 
-        logger.warning("RuleEngine fallback returned non-dict: %r", response)
-        return {
-            "engine": "rule",
-            "type": "conversation",
-            "reply": "Request processed.",
-            "tool": None,
-            "result": {"error": "invalid_rule_engine_response", "fallback_reason": reason},
-        }
+    def _normalize_rule_response(self, response: Any) -> dict:
+        if not isinstance(response, dict):
+            logger.warning(
+                "event=fallback_trigger phase=normalize invalid_rule_response_type=%s",
+                type(response).__name__,
+            )
+            return self._response_contract(
+                engine="rule",
+                response_type="conversation",
+                reply="Request processed.",
+                tool=None,
+                arguments=None,
+                result=None,
+            )
+
+        return self._response_contract(
+            engine="rule",
+            response_type=response.get("type", "conversation"),
+            reply=response.get("reply", "Request processed."),
+            tool=response.get("tool"),
+            arguments=response.get("arguments"),
+            result=response.get("result"),
+        )
+
+    def _tool_execution_failure_response(self) -> dict:
+        return self._response_contract(
+            engine="llm",
+            response_type="conversation",
+            reply=self.tool_execution_failure_reply,
+            tool=None,
+            arguments=None,
+            result=None,
+        )
 
     def _conversation_response(self, reply: str, result: Any = None) -> dict:
+        return self._response_contract(
+            engine="llm",
+            response_type="conversation",
+            reply=reply,
+            tool=None,
+            arguments=None,
+            result=result,
+        )
+
+    def _response_contract(
+        self,
+        engine: str,
+        response_type: str,
+        reply: Any,
+        tool: Any,
+        arguments: Any,
+        result: Any,
+    ) -> dict:
+        normalized_type = response_type if response_type in {"conversation", "tool_call"} else "conversation"
+        normalized_reply = reply.strip() if isinstance(reply, str) else ""
+        if not normalized_reply:
+            normalized_reply = "Request processed."
+
+        normalized_tool = tool if isinstance(tool, str) and tool.strip() else None
+        normalized_arguments = self._make_json_safe(arguments) if isinstance(arguments, dict) else None
+        if normalized_arguments is not None and not isinstance(normalized_arguments, dict):
+            normalized_arguments = None
+
+        if normalized_type != "tool_call":
+            normalized_tool = None
+            normalized_arguments = None
+
+        normalized_result = self._make_json_safe(result) if result is not None else None
+
         return {
-            "engine": "llm",
-            "type": "conversation",
-            "reply": reply,
-            "tool": None,
-            "result": result,
+            "engine": engine,
+            "type": normalized_type,
+            "reply": normalized_reply,
+            "tool": normalized_tool,
+            "arguments": normalized_arguments,
+            "result": normalized_result,
         }
 
     def _parse_tool_arguments(self, raw_arguments: Any) -> dict:
@@ -293,7 +361,7 @@ class LLMEngine(BaseEngine):
 
     def execute_tool(self, db: Session, tool_name: str, args: dict, garage_id: int):
         """Executes tool via registry safely."""
-        logger.info("Executing tool: %s with args: %s", tool_name, args)
+        logger.info("event=tool_execution phase=external_execute tool=%s", tool_name)
         return self.registry.execute(
             tool_name=tool_name,
             db=db,

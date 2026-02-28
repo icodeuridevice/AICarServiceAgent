@@ -10,7 +10,7 @@ import inspect
 import logging
 import types
 from datetime import date, datetime, time
-from typing import Any, Union, get_args, get_origin
+from typing import Any, Callable, Union, get_args, get_origin
 
 from sqlalchemy.orm import Session
 
@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 class ToolRegistry:
     def __init__(self):
-        self._tools = {
+        self._tools: dict[str, Callable] = {
             # Booking tools
             "create_booking": tool_create_booking,
             "reschedule_booking": tool_reschedule_booking,
@@ -46,6 +46,32 @@ class ToolRegistry:
 
             # Reporting tools
             "get_daily_summary": tool_get_daily_summary,
+        }
+        self._tool_schemas: dict[str, set[str]] = {
+            "create_booking": {
+                "customer_id",
+                "service_type",
+                "service_date",
+                "service_time",
+            },
+            "reschedule_booking": {
+                "booking_id",
+                "new_date",
+                "new_time",
+            },
+            "cancel_booking": {
+                "booking_id",
+            },
+            "create_jobcard": {
+                "booking_id",
+                "technician_name",
+            },
+            "complete_jobcard": {
+                "jobcard_id",
+            },
+            "get_daily_summary": {
+                "target_date",
+            },
         }
 
         self._tool_descriptions = {
@@ -120,28 +146,70 @@ class ToolRegistry:
 
         return sanitized
 
-    def execute(self, tool_name: str, db: Session, garage_id: int, **kwargs):
-        if tool_name not in self._tools:
-            raise ValueError(f"Tool '{tool_name}' not registered.")
+    def execute(self, tool_name: str, db: Session, garage_id: int, **kwargs) -> dict[str, Any]:
+        tool_function = self._tools.get(tool_name)
+        allowed_args = self._tool_schemas.get(tool_name)
+        if tool_function is None or allowed_args is None:
+            logger.warning("Tool validation failed: unknown tool '%s'", tool_name)
+            raise ValueError("Tool validation failed")
 
-        tool_function = self._tools[tool_name]
-        function_parameters = inspect.signature(tool_function).parameters
-        execute_kwargs = {"db": db}
+        if "garage_id" in kwargs:
+            logger.warning(
+                "Tool validation failed for '%s': 'garage_id' must not be provided in kwargs",
+                tool_name,
+            )
+            raise ValueError("Tool validation failed")
 
-        if "garage_id" in function_parameters:
-            execute_kwargs["garage_id"] = garage_id
+        provided_args = set(kwargs.keys())
+        unexpected_args = provided_args - allowed_args
+        if unexpected_args:
+            logger.warning(
+                "Tool validation failed for '%s': unexpected args=%s",
+                tool_name,
+                sorted(unexpected_args),
+            )
+            raise ValueError("Tool validation failed")
 
-        for key, value in kwargs.items():
-            if key in function_parameters and key != "db":
-                execute_kwargs[key] = value
-            else:
-                logger.warning(
-                    "Ignoring unsupported execute kwarg for '%s': %s",
-                    tool_name,
-                    key,
-                )
+        signature = inspect.signature(tool_function)
+        required_args = {
+            param_name
+            for param_name, param in signature.parameters.items()
+            if param_name not in {"db", "garage_id"}
+            and param.default is inspect._empty
+        }
+        missing_args = required_args - provided_args
+        if missing_args:
+            logger.warning(
+                "Tool validation failed for '%s': missing required args=%s",
+                tool_name,
+                sorted(missing_args),
+            )
+            raise ValueError("Tool validation failed")
 
-        return tool_function(**execute_kwargs)
+        execute_kwargs = {"db": db, "garage_id": garage_id}
+        for arg_name in allowed_args:
+            if arg_name in kwargs:
+                execute_kwargs[arg_name] = kwargs[arg_name]
+
+        logger.info("Tool execution started: %s", tool_name)
+        success = False
+        result: Any = None
+        error_message: str | None = None
+
+        try:
+            result = tool_function(**execute_kwargs)
+            success = True
+        except Exception as exc:
+            error_message = str(exc)
+            logger.exception("Tool execution failed for '%s'", tool_name)
+        finally:
+            logger.info("Tool execution finished: %s success=%s", tool_name, success)
+
+        return {
+            "success": success,
+            "data": result if success else None,
+            "error": None if success else error_message,
+        }
 
     def _build_openai_tool_definitions(self) -> list[dict]:
         tool_definitions = [
