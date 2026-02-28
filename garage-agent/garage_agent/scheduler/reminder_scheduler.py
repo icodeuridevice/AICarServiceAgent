@@ -11,13 +11,11 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from sqlalchemy import select
 from sqlalchemy.orm import joinedload
 
-from garage_agent.db.models import Booking, Vehicle, Customer
+from garage_agent.db.models import Booking, Vehicle, Customer, Garage
 from garage_agent.db.session import SessionLocal
 from garage_agent.services.twilio_client import send_whatsapp_message
 
 logger = logging.getLogger(__name__)
-
-REMINDER_STATUSES = ("PENDING", "CONFIRMED")
 
 
 def _send_daily_reminders() -> None:
@@ -27,56 +25,62 @@ def _send_daily_reminders() -> None:
 
     db = SessionLocal()
     try:
-        bookings = db.scalars(
-            select(Booking)
-            .options(
-                joinedload(Booking.vehicle).joinedload(Vehicle.customer),
-            )
-            .where(Booking.service_date == today)
-            .where(Booking.status.in_(REMINDER_STATUSES))
-            .where(Booking.reminder_sent.is_(False))  # noqa: E712
-        ).unique().all()
+        sent, failed = 0, 0
+        total_candidates = 0
 
-        if not bookings:
-            logger.info("No active bookings found for today.")
+        garages = db.scalars(select(Garage)).all()
+        if not garages:
+            logger.info("No garages found. Skipping reminder job.")
             return
 
-        sent, failed = 0, 0
-        for booking in bookings:
-            customer: Customer | None = booking.vehicle.customer if booking.vehicle else None
-            if customer is None or not customer.phone:
-                logger.warning(
-                    "Booking %d has no associated customer phone. Skipping.",
-                    booking.id,
+        for garage in garages:
+            bookings = db.scalars(
+                select(Booking)
+                .options(
+                    joinedload(Booking.vehicle).joinedload(Vehicle.customer),
                 )
-                failed += 1
-                continue
+                .where(Booking.garage_id == garage.id)
+                .where(Booking.service_date == today)
+                .where(Booking.status == "CONFIRMED")
+                .where(Booking.reminder_sent.is_(False))  # noqa: E712
+            ).unique().all()
 
-            message = (
-                f"Reminder: Your {booking.service_type} is scheduled today "
-                f"at {booking.service_time.strftime('%I:%M %p')}."
-            )
+            total_candidates += len(bookings)
+            for booking in bookings:
+                customer: Customer | None = booking.vehicle.customer if booking.vehicle else None
+                if customer is None or not customer.phone:
+                    logger.warning(
+                        "Booking %d has no associated customer phone. Skipping.",
+                        booking.id,
+                    )
+                    failed += 1
+                    continue
 
-            try:
-                message_sid = send_whatsapp_message(to=customer.phone, body=message)
-                booking.reminder_sent = True
-                booking.reminder_sent_at = datetime.now(timezone.utc)
-                booking.reminder_message_sid = message_sid
-                db.commit()
-                sent += 1
-            except Exception:
-                logger.exception(
-                    "Failed to send reminder for booking %d to %s",
-                    booking.id,
-                    customer.phone,
+                message = (
+                    f"Reminder: Your {booking.service_type} is scheduled today "
+                    f"at {booking.service_time.strftime('%I:%M %p')}."
                 )
-                failed += 1
+
+                try:
+                    message_sid = send_whatsapp_message(to=customer.phone, body=message)
+                    booking.reminder_sent = True
+                    booking.reminder_sent_at = datetime.now(timezone.utc)
+                    booking.reminder_message_sid = message_sid
+                    db.commit()
+                    sent += 1
+                except Exception:
+                    logger.exception(
+                        "Failed to send reminder for booking %d to %s",
+                        booking.id,
+                        customer.phone,
+                    )
+                    failed += 1
 
         logger.info(
             "Reminder job complete: %d sent, %d failed out of %d bookings.",
             sent,
             failed,
-            len(bookings),
+            total_candidates,
         )
     except Exception:
         logger.exception("Unhandled error in reminder job.")

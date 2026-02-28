@@ -19,6 +19,7 @@ class Garage(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
 
     phone: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    whatsapp_number: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
