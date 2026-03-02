@@ -204,6 +204,24 @@ class LLMEngine(BaseEngine):
                 )
                 predicted_date = result.get("predicted_next_service_date")
                 recurring_issues = result.get("recurring_issues", [])
+                critical_flag = False
+
+                if health_score < 40 or len(recurring_issues) >= 3:
+                    critical_flag = True
+
+                if critical_flag:
+                    logger.warning(
+                        "CRITICAL VEHICLE CONDITION DETECTED | phone=%s | score=%s | recurring=%s",
+                        phone,
+                        health_score,
+                        len(recurring_issues),
+                    )
+
+                    # Placeholder for future escalation actions
+                    # Example: create internal notification event
+                    escalation_message = "⚠️ Critical vehicle condition detected. Staff review required."
+                else:
+                    escalation_message = None
 
                 if health_score >= 80:
                     urgency = "Low"
@@ -229,6 +247,8 @@ class LLMEngine(BaseEngine):
                     "reply": message,
                     "tool": tool_name,
                     "result": result,
+                    "critical": critical_flag,
+                    "escalation_note": escalation_message,
                 }
 
             try:
