@@ -196,6 +196,41 @@ class LLMEngine(BaseEngine):
 
             serialized_result = self._make_json_safe(tool_execution.get("data"))
 
+            if tool_name == "analyze_vehicle_health":
+                result = serialized_result if isinstance(serialized_result, dict) else {}
+                health_score = result.get(
+                    "health_score",
+                    result.get("vehicle_health_score", 100),
+                )
+                predicted_date = result.get("predicted_next_service_date")
+                recurring_issues = result.get("recurring_issues", [])
+
+                if health_score >= 80:
+                    urgency = "Low"
+                    recommendation = "Vehicle condition is good."
+                elif health_score >= 50:
+                    urgency = "Medium"
+                    recommendation = "Service recommended soon."
+                else:
+                    urgency = "High"
+                    recommendation = "Immediate inspection advised."
+
+                message = (
+                    f"Vehicle Health Score: {health_score}/100\n"
+                    f"Urgency Level: {urgency}\n"
+                    f"Predicted Next Service: {predicted_date}\n"
+                    f"Recurring Issues: {len(recurring_issues)} detected\n\n"
+                    f"Recommendation: {recommendation}"
+                )
+
+                return {
+                    "engine": "llm",
+                    "type": "intelligence_report",
+                    "reply": message,
+                    "tool": tool_name,
+                    "result": result,
+                }
+
             try:
                 logger.info("event=model_call phase=followup_start model=%s tool=%s", self.model, tool_name)
                 final_reply = self._generate_tool_followup_reply(
