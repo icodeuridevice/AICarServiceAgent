@@ -298,3 +298,29 @@ class JobCard(Base):
         back_populates="job_cards",
         overlaps="booking,job_card",
     )
+
+
+class Escalation(Base):
+    """Represents a critical vehicle escalation event."""
+
+    __tablename__ = "escalations"
+
+    id: Mapped[int] = mapped_column(primary_key=True, index=True)
+    garage_id: Mapped[int] = mapped_column(
+        ForeignKey("garages.id"),
+        nullable=False,
+    )
+    vehicle_id: Mapped[int] = mapped_column(
+        ForeignKey("vehicles.id"),
+        nullable=False,
+    )
+
+    reason: Mapped[str] = mapped_column(String, nullable=False)
+    health_score: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    resolved: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=datetime.utcnow,
+    )

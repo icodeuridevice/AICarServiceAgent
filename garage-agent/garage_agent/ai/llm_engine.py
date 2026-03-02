@@ -217,6 +217,16 @@ class LLMEngine(BaseEngine):
                         len(recurring_issues),
                     )
 
+                    from garage_agent.services.escalation_service import create_escalation
+
+                    create_escalation(
+                        db=db,
+                        garage_id=garage_id,
+                        vehicle_id=arguments["vehicle_id"],
+                        reason="Critical health score or repeated issue",
+                        health_score=health_score,
+                    )
+
                     # Placeholder for future escalation actions
                     # Example: create internal notification event
                     escalation_message = "⚠️ Critical vehicle condition detected. Staff review required."
