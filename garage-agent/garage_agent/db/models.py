@@ -131,6 +131,10 @@ class Vehicle(Base):
     next_service_due_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
     next_service_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
     next_service_mileage: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    last_reminder_sent_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

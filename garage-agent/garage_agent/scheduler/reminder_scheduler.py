@@ -13,6 +13,10 @@ from sqlalchemy.orm import joinedload
 
 from garage_agent.db.models import Booking, Vehicle, Customer, Garage
 from garage_agent.db.session import SessionLocal
+from garage_agent.services.predictive_reminder_service import (
+    get_due_vehicles,
+    mark_reminder_sent,
+)
 from garage_agent.services.twilio_client import send_whatsapp_message
 
 logger = logging.getLogger(__name__)
@@ -73,12 +77,59 @@ def _send_daily_reminders(garage_id: int) -> None:
                 )
                 failed += 1
 
+        predictive_sent, predictive_failed = 0, 0
+        due_vehicles = [
+            vehicle
+            for vehicle in get_due_vehicles(db)
+            if vehicle.garage_id == garage_id
+        ]
+        for vehicle in due_vehicles:
+
+            if vehicle.last_reminder_sent_at:
+                continue
+
+            customer: Customer | None = vehicle.customer
+            if customer is None or not customer.phone:
+                logger.warning(
+                    "Vehicle %d has no associated customer phone. Skipping predictive reminder.",
+                    vehicle.id,
+                )
+                predictive_failed += 1
+                continue
+
+            message = (
+                f"Your vehicle is due for service on "
+                f"{vehicle.next_service_date}. "
+                "Reply YES to book your slot."
+            )
+
+            try:
+                send_whatsapp_message(to=customer.phone, body=message)
+                mark_reminder_sent(vehicle)
+                predictive_sent += 1
+            except Exception:
+                logger.exception(
+                    "Failed to send predictive reminder for vehicle %d to %s",
+                    vehicle.id,
+                    customer.phone,
+                )
+                predictive_failed += 1
+
+        db.commit()
+
         logger.info(
             "Reminder job complete for garage_id=%s: %d sent, %d failed out of %d bookings.",
             garage_id,
             sent,
             failed,
             total_candidates,
+        )
+        logger.info(
+            "Predictive reminder run for garage_id=%s: %d sent, %d failed out of %d due vehicles.",
+            garage_id,
+            predictive_sent,
+            predictive_failed,
+            len(due_vehicles),
         )
     except Exception:
         logger.exception("Unhandled error in reminder job.")
