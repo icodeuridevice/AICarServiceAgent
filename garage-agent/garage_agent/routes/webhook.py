@@ -122,6 +122,38 @@ async def receive_webhook(
     )
 
     # ------------------------------------------------------------
+    # Auto-booking from predictive reminder reply (deterministic)
+    # ------------------------------------------------------------
+
+    lower_msg = incoming_message.strip().lower()
+    if lower_msg in ("yes", "book", "ok", "schedule"):
+        try:
+            from garage_agent.services.auto_booking_service import auto_book_from_reminder
+
+            booking = auto_book_from_reminder(
+                db=db,
+                garage_id=garage_id,
+                phone=phone,
+            )
+
+            if booking:
+                reply = (
+                    f"Booking confirmed for {booking.service_date.strftime('%Y-%m-%d')} "
+                    f"at {booking.service_time.strftime('%H:%M')}."
+                )
+                return Response(
+                    content=_build_twiml_reply(reply),
+                    media_type="application/xml",
+                )
+        except Exception:
+            logger.exception(
+                "Auto-booking from reminder failed for phone=%s, garage_id=%s. "
+                "Falling back to normal flow.",
+                phone,
+                garage_id,
+            )
+
+    # ------------------------------------------------------------
     # AI Engine (future-proof layer)
     # ------------------------------------------------------------
 

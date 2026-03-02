@@ -330,3 +330,31 @@ class Escalation(Base):
         nullable=False,
         default=datetime.utcnow,
     )
+
+
+class Reminder(Base):
+    """Tracks predictive reminders sent to customers for auto-booking."""
+
+    __tablename__ = "reminders"
+
+    id: Mapped[int] = mapped_column(primary_key=True, index=True)
+    garage_id: Mapped[int] = mapped_column(
+        ForeignKey("garages.id"),
+        nullable=False,
+        index=True,
+    )
+    phone: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    service_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    predicted_date: Mapped[date] = mapped_column(Date, nullable=False)
+
+    status: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="SENT",
+        server_default=text("'SENT'"),
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )

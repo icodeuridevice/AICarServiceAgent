@@ -11,7 +11,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from sqlalchemy import select
 from sqlalchemy.orm import joinedload
 
-from garage_agent.db.models import Booking, Vehicle, Customer, Garage
+from garage_agent.db.models import Booking, Reminder, Vehicle, Customer, Garage
 from garage_agent.db.session import SessionLocal
 from garage_agent.services.predictive_reminder_service import (
     get_due_vehicles,
@@ -20,6 +20,20 @@ from garage_agent.services.predictive_reminder_service import (
 from garage_agent.services.twilio_client import send_whatsapp_message
 
 logger = logging.getLogger(__name__)
+
+
+def _infer_service_type(db, vehicle) -> str:
+    """Return service_type from the vehicle's last completed booking, or default."""
+    last_booking = db.scalar(
+        select(Booking)
+        .where(Booking.vehicle_id == vehicle.id)
+        .where(Booking.garage_id == vehicle.garage_id)
+        .where(Booking.status == "COMPLETED")
+        .order_by(Booking.service_date.desc())
+    )
+    if last_booking is not None:
+        return last_booking.service_type
+    return "general_service"
 
 
 def _send_daily_reminders(garage_id: int) -> None:
@@ -106,6 +120,17 @@ def _send_daily_reminders(garage_id: int) -> None:
             try:
                 send_whatsapp_message(to=customer.phone, body=message)
                 mark_reminder_sent(vehicle)
+
+                # Store Reminder record for auto-booking on reply
+                service_type = _infer_service_type(db, vehicle)
+                db.add(Reminder(
+                    garage_id=garage_id,
+                    phone=customer.phone,
+                    service_type=service_type,
+                    predicted_date=vehicle.next_service_date,
+                    status="SENT",
+                ))
+
                 predictive_sent += 1
             except Exception:
                 logger.exception(
