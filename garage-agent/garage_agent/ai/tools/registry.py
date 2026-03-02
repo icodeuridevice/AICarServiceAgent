@@ -24,6 +24,9 @@ from garage_agent.ai.tools.jobcard_tools import (
     tool_create_jobcard,
     tool_complete_jobcard,
 )
+from garage_agent.ai.tools.intelligence_tools import (
+    tool_analyze_vehicle_health,
+)
 
 from garage_agent.ai.tools.report_tools import (
     tool_get_daily_summary,
@@ -46,6 +49,9 @@ class ToolRegistry:
 
             # Reporting tools
             "get_daily_summary": tool_get_daily_summary,
+
+            # Intelligence tools
+            "analyze_vehicle_health": tool_analyze_vehicle_health,
         }
         self._tool_schemas: dict[str, set[str]] = {
             "create_booking": {
@@ -72,6 +78,9 @@ class ToolRegistry:
             "get_daily_summary": {
                 "target_date",
             },
+            "analyze_vehicle_health": {
+                "vehicle_id",
+            },
         }
 
         self._tool_descriptions = {
@@ -81,6 +90,7 @@ class ToolRegistry:
             "create_jobcard": "Create a job card for a booking.",
             "complete_jobcard": "Mark a job card as completed.",
             "get_daily_summary": "Get daily bookings and revenue summary.",
+            "analyze_vehicle_health": "Analyze vehicle service history and health score",
         }
 
         self._tool_param_types = {
@@ -107,6 +117,9 @@ class ToolRegistry:
             },
             "get_daily_summary": {
                 "target_date": date | None,
+            },
+            "analyze_vehicle_health": {
+                "vehicle_id": int,
             },
         }
         self._openai_tool_definitions = self._build_openai_tool_definitions()
@@ -186,7 +199,9 @@ class ToolRegistry:
             )
             raise ValueError("Tool validation failed")
 
-        execute_kwargs = {"db": db, "garage_id": garage_id}
+        execute_kwargs = {"db": db}
+        if "garage_id" in signature.parameters:
+            execute_kwargs["garage_id"] = garage_id
         for arg_name in allowed_args:
             if arg_name in kwargs:
                 execute_kwargs[arg_name] = kwargs[arg_name]
@@ -349,6 +364,24 @@ class ToolRegistry:
                             },
                         },
                         "required": [],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "analyze_vehicle_health",
+                    "description": self._tool_descriptions["analyze_vehicle_health"],
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "vehicle_id": {
+                                "type": "integer",
+                                "description": "Vehicle ID to analyze",
+                            },
+                        },
+                        "required": ["vehicle_id"],
                         "additionalProperties": False,
                     },
                 },
