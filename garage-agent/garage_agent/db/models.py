@@ -129,6 +129,8 @@ class Vehicle(Base):
     vehicle_number: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     vehicle_model: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     next_service_due_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    next_service_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    next_service_mileage: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

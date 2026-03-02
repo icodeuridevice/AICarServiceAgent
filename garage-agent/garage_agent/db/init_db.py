@@ -178,6 +178,16 @@ def init_db() -> None:
             column_ddl="next_service_due_date DATE",
         )
         _ensure_column(
+            table_name="vehicles",
+            column_name="next_service_date",
+            column_ddl="next_service_date DATE",
+        )
+        _ensure_column(
+            table_name="vehicles",
+            column_name="next_service_mileage",
+            column_ddl="next_service_mileage INTEGER",
+        )
+        _ensure_column(
             table_name="garages",
             column_name="whatsapp_number",
             column_ddl="whatsapp_number VARCHAR(32)",

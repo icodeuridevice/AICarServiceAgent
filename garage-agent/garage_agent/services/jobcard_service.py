@@ -109,14 +109,24 @@ def complete_job_card(db: Session, jobcard_id: int, *, garage_id: int) -> JobCar
         raise ValueError("Booking vehicle not found.")
 
     booking.status = "COMPLETED"
-    booking.vehicle.next_service_due_date = calculate_next_service(
+    from garage_agent.services.predictive_service import predict_next_service
+
+    vehicle = booking.vehicle
+
+    next_date, next_mileage = predict_next_service(
+        service_type=booking.service_type,
+        current_mileage=getattr(vehicle, "current_mileage", None),
+    )
+    vehicle.next_service_date = next_date
+    vehicle.next_service_mileage = next_mileage
+    vehicle.next_service_due_date = calculate_next_service(
         service_type=booking.service_type,
         service_date=booking.service_date,
     )
     update_customer_health(
         db=db,
         garage_id=garage_id,
-        customer_id=booking.vehicle.customer_id,
+        customer_id=vehicle.customer_id,
     )
 
     db.commit()
