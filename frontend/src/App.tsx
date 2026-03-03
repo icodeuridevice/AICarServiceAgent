@@ -3,6 +3,7 @@ import Login from "./pages/Login";
 import ProtectedRoute from "./auth/ProtectedRoute";
 import DashboardLayout from "./layouts/DashboardLayout";
 import Dashboard from "./pages/Dashboard";
+import Bookings from "./pages/Bookings";
 
 function App() {
   return (
@@ -15,6 +16,16 @@ function App() {
             <ProtectedRoute>
               <DashboardLayout title="Dashboard">
                 <Dashboard />
+              </DashboardLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/dashboard/bookings"
+          element={
+            <ProtectedRoute>
+              <DashboardLayout title="Bookings">
+                <Bookings />
               </DashboardLayout>
             </ProtectedRoute>
           }

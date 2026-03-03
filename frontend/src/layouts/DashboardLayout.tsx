@@ -25,6 +25,7 @@ export default function DashboardLayout({ children, title }: DashboardLayoutProp
 
                 <nav className="flex-1 py-4 flex flex-col">
                     <NavLink
+                        end
                         to="/dashboard"
                         className={({ isActive }) =>
                             `py-3 px-6 ${isActive ? "text-blue-600 font-medium bg-blue-50" : "text-gray-600 hover:bg-gray-50"}`
@@ -33,7 +34,7 @@ export default function DashboardLayout({ children, title }: DashboardLayoutProp
                         Dashboard
                     </NavLink>
                     <NavLink
-                        to="/bookings"
+                        to="/dashboard/bookings"
                         className={({ isActive }) =>
                             `py-3 px-6 ${isActive ? "text-blue-600 font-medium bg-blue-50" : "text-gray-600 hover:bg-gray-50"}`
                         }
