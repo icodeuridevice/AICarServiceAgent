@@ -42,7 +42,7 @@ export default function DashboardLayout({ children, title }: DashboardLayoutProp
                         Bookings
                     </NavLink>
                     <NavLink
-                        to="/jobcards"
+                        to="/dashboard/jobcards"
                         className={({ isActive }) =>
                             `py-3 px-6 ${isActive ? "text-blue-600 font-medium bg-blue-50" : "text-gray-600 hover:bg-gray-50"}`
                         }

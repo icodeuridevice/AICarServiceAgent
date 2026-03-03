@@ -4,6 +4,7 @@ import ProtectedRoute from "./auth/ProtectedRoute";
 import DashboardLayout from "./layouts/DashboardLayout";
 import Dashboard from "./pages/Dashboard";
 import Bookings from "./pages/Bookings";
+import JobCards from "./pages/JobCards";
 
 function App() {
   return (
@@ -26,6 +27,16 @@ function App() {
             <ProtectedRoute>
               <DashboardLayout title="Bookings">
                 <Bookings />
+              </DashboardLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/dashboard/jobcards"
+          element={
+            <ProtectedRoute>
+              <DashboardLayout title="JobCards">
+                <JobCards />
               </DashboardLayout>
             </ProtectedRoute>
           }
