@@ -41,6 +41,16 @@ function App() {
             </ProtectedRoute>
           }
         />
+        <Route
+          path="/reports"
+          element={
+            <ProtectedRoute>
+              <DashboardLayout title="Reports">
+                <Dashboard />
+              </DashboardLayout>
+            </ProtectedRoute>
+          }
+        />
         {/* Redirect root to login by default */}
         <Route path="/" element={<Navigate to="/login" replace />} />
       </Routes>
