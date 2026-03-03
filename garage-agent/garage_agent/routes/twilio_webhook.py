@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 
 from garage_agent.db.session import get_db
 from garage_agent.db.models import Booking
+from garage_agent.core.response import success_response
 
 router = APIRouter(prefix="/twilio", tags=["twilio"])
 
@@ -14,6 +15,8 @@ def twilio_status_callback(
     MessageStatus: str = Form(...),
     db: Session = Depends(get_db),
 ):
+    # NOTE: MessageSid is globally unique (Twilio-assigned), so no cross-garage
+    # risk exists here.  The lookup is safe without an explicit garage_id filter.
     booking = (
         db.query(Booking)
         .filter(Booking.reminder_message_sid == MessageSid)
@@ -28,4 +31,4 @@ def twilio_status_callback(
 
         db.commit()
 
-    return {"received": True}
+    return success_response(message="Status received")

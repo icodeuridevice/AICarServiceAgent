@@ -92,11 +92,7 @@ def _send_daily_reminders(garage_id: int) -> None:
                 failed += 1
 
         predictive_sent, predictive_failed = 0, 0
-        due_vehicles = [
-            vehicle
-            for vehicle in get_due_vehicles(db)
-            if vehicle.garage_id == garage_id
-        ]
+        due_vehicles = get_due_vehicles(db, garage_id=garage_id)
         for vehicle in due_vehicles:
 
             if vehicle.last_reminder_sent_at:

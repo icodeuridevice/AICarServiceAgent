@@ -8,8 +8,11 @@ from garage_agent.services.vehicle_intelligence_service import (
 def tool_analyze_vehicle_health(
     db: Session,
     vehicle_id: int,
+    garage_id: int,
 ):
     return get_vehicle_intelligence_report(
         db=db,
         vehicle_id=vehicle_id,
+        garage_id=garage_id,
     )
+

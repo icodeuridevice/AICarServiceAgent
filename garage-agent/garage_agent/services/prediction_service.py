@@ -26,7 +26,7 @@ def _calculate_average_interval_days(service_dates: list[date]) -> int:
     return int(round(sum(gaps) / len(gaps)))
 
 
-def predict_next_service_date(db: Session, vehicle_id: int) -> ServiceDatePrediction:
+def predict_next_service_date(db: Session, vehicle_id: int, garage_id: int) -> ServiceDatePrediction:
     """Predict the next service date using completed service history.
 
     Rules:
@@ -38,6 +38,7 @@ def predict_next_service_date(db: Session, vehicle_id: int) -> ServiceDatePredic
     Args:
         db: SQLAlchemy database session.
         vehicle_id: Target vehicle identifier.
+        garage_id: Garage scope for isolation.
 
     Returns:
         Prediction payload with last service date, predicted next date,
@@ -46,7 +47,7 @@ def predict_next_service_date(db: Session, vehicle_id: int) -> ServiceDatePredic
     Raises:
         ValueError: If no completed services are found for the vehicle.
     """
-    completed_services = get_vehicle_completed_services(db=db, vehicle_id=vehicle_id)
+    completed_services = get_vehicle_completed_services(db=db, vehicle_id=vehicle_id, garage_id=garage_id)
     if not completed_services:
         raise ValueError("No completed services found for the vehicle.")
 

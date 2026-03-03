@@ -29,10 +29,13 @@ class VehicleCompletedServiceItem(TypedDict):
     total_cost: float | None
 
 
-def _ensure_vehicle_exists(db: Session, vehicle_id: int) -> None:
-    """Validate that the target vehicle exists before querying history."""
+def _ensure_vehicle_exists(db: Session, vehicle_id: int, garage_id: int) -> None:
+    """Validate that the target vehicle exists in the given garage."""
     vehicle_exists = db.scalar(
-        select(Vehicle.id).where(Vehicle.id == vehicle_id).limit(1)
+        select(Vehicle.id)
+        .where(Vehicle.id == vehicle_id)
+        .where(Vehicle.garage_id == garage_id)
+        .limit(1)
     )
     if vehicle_exists is None:
         raise ValueError("Vehicle not found.")
@@ -41,6 +44,7 @@ def _ensure_vehicle_exists(db: Session, vehicle_id: int) -> None:
 def get_vehicle_service_history(
     db: Session,
     vehicle_id: int,
+    garage_id: int,
 ) -> list[VehicleServiceHistoryItem]:
     """Return all completed job-card-backed services for a vehicle, oldest first.
 
@@ -49,7 +53,7 @@ def get_vehicle_service_history(
     Raises:
         ValueError: If the vehicle does not exist.
     """
-    _ensure_vehicle_exists(db=db, vehicle_id=vehicle_id)
+    _ensure_vehicle_exists(db=db, vehicle_id=vehicle_id, garage_id=garage_id)
 
     history_query = (
         select(
@@ -70,6 +74,7 @@ def get_vehicle_service_history(
             ),
         )
         .where(Booking.vehicle_id == vehicle_id)
+        .where(Booking.garage_id == garage_id)
         .where(Booking.status == "COMPLETED")
         .order_by(
             Booking.service_date.asc(),
@@ -103,13 +108,14 @@ def get_vehicle_service_history(
 def get_vehicle_completed_services(
     db: Session,
     vehicle_id: int,
+    garage_id: int,
 ) -> list[VehicleCompletedServiceItem]:
     """Return a minimal completed-service view for intelligence consumers.
 
     Raises:
         ValueError: If the vehicle does not exist.
     """
-    history = get_vehicle_service_history(db=db, vehicle_id=vehicle_id)
+    history = get_vehicle_service_history(db=db, vehicle_id=vehicle_id, garage_id=garage_id)
     return [
         {
             "service_type": item["service_type"],

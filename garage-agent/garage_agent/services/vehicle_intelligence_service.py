@@ -53,6 +53,7 @@ def _compute_vehicle_health_score(
 def get_vehicle_intelligence_report(
     db: Session,
     vehicle_id: int,
+    garage_id: int,
 ) -> VehicleIntelligenceReport:
     """Return a single intelligence report for a vehicle.
 
@@ -64,6 +65,7 @@ def get_vehicle_intelligence_report(
     Args:
         db: SQLAlchemy database session.
         vehicle_id: Target vehicle identifier.
+        garage_id: Garage scope for isolation.
 
     Returns:
         Aggregated intelligence payload with service counts, timeline, prediction,
@@ -72,11 +74,11 @@ def get_vehicle_intelligence_report(
     Raises:
         ValueError: If the vehicle does not exist.
     """
-    service_history = get_vehicle_service_history(db=db, vehicle_id=vehicle_id)
+    service_history = get_vehicle_service_history(db=db, vehicle_id=vehicle_id, garage_id=garage_id)
     total_services = len(service_history)
     last_service_date = service_history[-1]["service_date"] if service_history else None
 
-    recurring_issue_summary = detect_recurring_issues(db=db, vehicle_id=vehicle_id)
+    recurring_issue_summary = detect_recurring_issues(db=db, vehicle_id=vehicle_id, garage_id=garage_id)
     recurring_issues = recurring_issue_summary["recurring_issues"]
 
     predicted_next_service_date: date | None = None
@@ -84,7 +86,7 @@ def get_vehicle_intelligence_report(
     confidence: float | None = None
 
     if total_services > 0:
-        prediction = predict_next_service_date(db=db, vehicle_id=vehicle_id)
+        prediction = predict_next_service_date(db=db, vehicle_id=vehicle_id, garage_id=garage_id)
         predicted_next_service_date = prediction["predicted_next_service_date"]
         interval_days = prediction["interval_days"]
         confidence = prediction["confidence"]

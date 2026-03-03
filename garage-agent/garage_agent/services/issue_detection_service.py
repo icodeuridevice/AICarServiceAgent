@@ -30,7 +30,7 @@ def _severity_for_occurrences(occurrences: int) -> str:
     return "medium"
 
 
-def detect_recurring_issues(db: Session, vehicle_id: int) -> RecurringIssueSummary:
+def detect_recurring_issues(db: Session, vehicle_id: int, garage_id: int) -> RecurringIssueSummary:
     """Detect recurring service issues for a vehicle.
 
     The function is read-only and derives issue frequency from completed
@@ -39,6 +39,7 @@ def detect_recurring_issues(db: Session, vehicle_id: int) -> RecurringIssueSumma
     Args:
         db: SQLAlchemy database session.
         vehicle_id: Target vehicle identifier.
+        garage_id: Garage scope for isolation.
 
     Returns:
         A summary containing recurring service types (>=2 occurrences) and
@@ -47,7 +48,7 @@ def detect_recurring_issues(db: Session, vehicle_id: int) -> RecurringIssueSumma
     Raises:
         ValueError: If the vehicle does not exist.
     """
-    completed_services = get_vehicle_completed_services(db=db, vehicle_id=vehicle_id)
+    completed_services = get_vehicle_completed_services(db=db, vehicle_id=vehicle_id, garage_id=garage_id)
     total_services = len(completed_services)
 
     if total_services == 0:
