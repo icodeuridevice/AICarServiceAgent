@@ -7,6 +7,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from garage_agent.db.models import Booking, Customer, Vehicle
+from garage_agent.services.audit_service import create_audit_log
 from garage_agent.intelligence.customer_health import update_customer_health
 from garage_agent.intelligence.service_prediction import calculate_next_service
 
@@ -155,7 +156,21 @@ def create_booking(
         db.add(booking)
         db.commit()
         db.refresh(booking)
-        
+
+        create_audit_log(
+            db=db,
+            garage_id=garage_id,
+            action_type="BOOKING_CREATED",
+            entity_type="Booking",
+            entity_id=booking.id,
+            metadata={
+                "customer_id": customer_id,
+                "service_type": service_type,
+                "service_date": str(service_date),
+                "service_time": str(service_time),
+            },
+        )
+
         logger.info(
             "Booking created",
             extra={
@@ -163,7 +178,7 @@ def create_booking(
                 "customer_id": customer_id,
             },
         )
-        
+
         return booking
     except SQLAlchemyError:
         db.rollback()
@@ -304,6 +319,16 @@ def cancel_booking(db: Session, garage_id: int, booking_id: int) -> Booking:
 
         db.commit()
         db.refresh(booking)
+
+        create_audit_log(
+            db=db,
+            garage_id=garage_id,
+            action_type="BOOKING_CANCELLED",
+            entity_type="Booking",
+            entity_id=booking.id,
+            metadata={"previous_status": "PENDING/CONFIRMED"},
+        )
+
         return booking
 
     except SQLAlchemyError:

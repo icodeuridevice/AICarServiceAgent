@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from garage_agent.db.models import Booking, JobCard
 from garage_agent.intelligence.customer_health import update_customer_health
 from garage_agent.intelligence.service_prediction import calculate_next_service
+from garage_agent.services.audit_service import create_audit_log
 
 
 def create_job_card(
@@ -131,6 +132,15 @@ def complete_job_card(db: Session, jobcard_id: int, *, garage_id: int) -> JobCar
 
     db.commit()
     db.refresh(job)
+
+    create_audit_log(
+        db=db,
+        garage_id=garage_id,
+        action_type="JOBCARD_COMPLETED",
+        entity_type="JobCard",
+        entity_id=job.id,
+        metadata={"booking_id": job.booking_id},
+    )
 
     return job
 

@@ -11,6 +11,7 @@ from garage_agent.services.booking_service import (
     get_or_create_customer_by_phone,
 )
 from garage_agent.services.reminder_service import get_active_reminder
+from garage_agent.services.audit_service import create_audit_log
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +52,18 @@ def auto_book_from_reminder(
     reminder.booking_id = booking.id
     db.commit()
 
+    create_audit_log(
+        db=db,
+        garage_id=garage_id,
+        action_type="REMINDER_AUTO_BOOKED",
+        entity_type="Booking",
+        entity_id=booking.id,
+        metadata={
+            "reminder_id": reminder.id,
+            "phone": phone,
+        },
+    )
+
     logger.info(
         "Auto-booked from reminder: booking_id=%s, phone=%s, garage_id=%s",
         booking.id,
@@ -59,4 +72,5 @@ def auto_book_from_reminder(
     )
 
     return booking
+
 

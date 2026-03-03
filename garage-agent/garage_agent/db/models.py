@@ -410,3 +410,26 @@ class Reminder(Base):
         ForeignKey("bookings.id"),
         nullable=True,
     )
+
+
+class AuditLog(Base):
+    """Enterprise audit trail for critical operations."""
+
+    __tablename__ = "audit_logs"
+
+    id: Mapped[int] = mapped_column(primary_key=True, index=True)
+
+    garage_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    user_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
+    action_type: Mapped[str] = mapped_column(String, nullable=False)
+    entity_type: Mapped[str] = mapped_column(String, nullable=False)
+    entity_id: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    extra: Mapped[Optional[dict]] = mapped_column("metadata", type_=String, nullable=True)
+
+    created_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        default=datetime.utcnow,
+    )
+

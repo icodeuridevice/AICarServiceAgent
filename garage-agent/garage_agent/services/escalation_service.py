@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 
 from garage_agent.db.models import Escalation
 from garage_agent.services.escalation_alert_service import notify_staff_escalation
+from garage_agent.services.audit_service import create_audit_log
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,19 @@ def create_escalation(
     db.commit()
     db.refresh(escalation)
 
+    create_audit_log(
+        db=db,
+        garage_id=garage_id,
+        action_type="ESCALATION_CREATED",
+        entity_type="Escalation",
+        entity_id=escalation.id,
+        metadata={
+            "vehicle_id": vehicle_id,
+            "reason": reason,
+            "health_score": health_score,
+        },
+    )
+
     try:
         notify_staff_escalation(
             vehicle_id=vehicle_id,
@@ -39,3 +53,4 @@ def create_escalation(
         )
 
     return escalation
+
