@@ -134,7 +134,6 @@ export default function Bookings() {
                 <RescheduleModal
                     bookingId={selectedBookingForReschedule.id}
                     currentDate={selectedBookingForReschedule.service_date}
-                    currentTime={selectedBookingForReschedule.service_time}
                     onClose={handleCloseReschedule}
                     onSuccess={loadBookings}
                 />

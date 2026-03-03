@@ -6,7 +6,6 @@ import ErrorBanner from "./ErrorBanner";
 interface RescheduleModalProps {
     bookingId: number;
     currentDate: string;
-    currentTime?: string;
     onClose: () => void;
     onSuccess: () => void;
 }
@@ -15,21 +14,7 @@ const toInputDate = (date: string): string => {
     return date.slice(0, 10);
 };
 
-const normalizeTimeForApi = (timeValue: string | undefined, dateValue: string): string => {
-    const directMatch = timeValue?.match(/^(\d{2}):(\d{2})(?::(\d{2}))?/);
-    if (directMatch) {
-        const [, hours, minutes, seconds] = directMatch;
-        return `${hours}:${minutes}:${seconds ?? "00"}`;
-    }
-
-    const dateMatch = dateValue.match(/T(\d{2}):(\d{2})(?::(\d{2}))?/);
-    if (dateMatch) {
-        const [, hours, minutes, seconds] = dateMatch;
-        return `${hours}:${minutes}:${seconds ?? "00"}`;
-    }
-
-    return "09:00:00";
-};
+const DATE_ONLY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 
 const getApiErrorMessage = (err: unknown): string => {
     if (!axios.isAxiosError(err)) {
@@ -67,7 +52,6 @@ const getApiErrorMessage = (err: unknown): string => {
 export default function RescheduleModal({
     bookingId,
     currentDate,
-    currentTime,
     onClose,
     onSuccess,
 }: RescheduleModalProps) {
@@ -81,13 +65,18 @@ export default function RescheduleModal({
             return;
         }
 
+        if (!DATE_ONLY_PATTERN.test(newDate)) {
+            setError("Date must be in YYYY-MM-DD format.");
+            return;
+        }
+
         try {
             setLoading(true);
             setError("");
+            const formattedDate = newDate;
             await rescheduleBooking(
-                bookingId,
-                newDate,
-                normalizeTimeForApi(currentTime, currentDate)
+                Number(bookingId),
+                formattedDate
             );
             onClose();
             onSuccess();

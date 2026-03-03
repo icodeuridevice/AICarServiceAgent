@@ -44,12 +44,10 @@ export const fetchBookings = async (): Promise<Booking[]> => {
 
 export const rescheduleBooking = async (
     bookingId: number,
-    newDate: string,
-    serviceTime: string
+    newDate: string
 ): Promise<void> => {
     await api.put("/bookings/reschedule", {
         booking_id: bookingId,
         service_date: newDate,
-        service_time: serviceTime,
     });
 };

@@ -1,4 +1,4 @@
-from datetime import date, time
+from datetime import date
 
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
@@ -26,7 +26,10 @@ from garage_agent.schemas.booking import (
     CancelResponse,
 )
 
-router = APIRouter(prefix="/bookings", tags=["bookings"])
+router = APIRouter(
+    prefix="/bookings",
+    tags=["bookings"],
+)
 
 
 def _resolve_route_garage_id(db: Session, phone: str | None = None) -> int:
@@ -38,10 +41,9 @@ def _resolve_route_garage_id(db: Session, phone: str | None = None) -> int:
 class StatusUpdate(BaseModel):
     status: str
 
-class RescheduleRequest(BaseModel):
+class BookingRescheduleRequest(BaseModel):
     booking_id: int
     service_date: date
-    service_time: time
 
 ALLOWED_STATUSES = ["PENDING", "CONFIRMED", "IN_PROGRESS", "COMPLETED", "CANCELLED"]
 
@@ -179,30 +181,38 @@ def update_status(
 )
 
 
-@router.put("/reschedule", response_model=APIResponse[RescheduleResponse])
+@router.put("/reschedule")
 def reschedule_booking(
-    payload: RescheduleRequest,
+    request: BookingRescheduleRequest,
     current_user: User = Depends(require_staff),
     db: Session = Depends(get_db),
 ):
     garage_id = current_user.garage_id
     from garage_agent.services.booking_service import reschedule_booking as reschedule_engine
 
-    booking = reschedule_engine(
+    booking = db.scalar(
+        select(Booking)
+        .where(Booking.id == request.booking_id)
+        .where(Booking.garage_id == garage_id)
+    )
+    if booking is None:
+        raise HTTPException(status_code=404, detail="Booking not found")
+
+    updated_booking = reschedule_engine(
         db=db,
         garage_id=garage_id,
-        booking_id=payload.booking_id,
-        new_date=payload.service_date,
-        new_time=payload.service_time,
+        booking_id=request.booking_id,
+        new_date=request.service_date,
+        new_time=booking.service_time,
     )
 
     return APIResponse(
     success=True,
     data=RescheduleResponse(
-        booking_id=booking.id,
-        new_date=booking.service_date,
-        new_time=booking.service_time,
-        status=booking.status,
+        booking_id=updated_booking.id,
+        new_date=updated_booking.service_date,
+        new_time=updated_booking.service_time,
+        status=updated_booking.status,
     ),
 )
 
