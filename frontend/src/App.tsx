@@ -5,6 +5,7 @@ import DashboardLayout from "./layouts/DashboardLayout";
 import Dashboard from "./pages/Dashboard";
 import Bookings from "./pages/Bookings";
 import JobCards from "./pages/JobCards";
+import Reminders from "./pages/Reminders";
 
 function App() {
   return (
@@ -47,6 +48,16 @@ function App() {
             <ProtectedRoute>
               <DashboardLayout title="Reports">
                 <Dashboard />
+              </DashboardLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/dashboard/reminders"
+          element={
+            <ProtectedRoute>
+              <DashboardLayout title="Reminders">
+                <Reminders />
               </DashboardLayout>
             </ProtectedRoute>
           }
