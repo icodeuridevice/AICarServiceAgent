@@ -219,6 +219,17 @@ def init_db() -> None:
 
         _backfill_garage_whatsapp_numbers()
 
+        _ensure_column(
+            table_name="reminders",
+            column_name="responded_at",
+            column_ddl="responded_at DATETIME",
+        )
+        _ensure_column(
+            table_name="reminders",
+            column_name="booking_id",
+            column_ddl="booking_id INTEGER REFERENCES bookings(id)",
+        )
+
         _ensure_unique_index_if_clean(
             table_name="garages",
             index_name="uq_garages_whatsapp_number",

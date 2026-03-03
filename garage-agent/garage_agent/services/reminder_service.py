@@ -1,5 +1,7 @@
 """Service layer for querying and updating predictive reminders."""
 
+from datetime import datetime
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -20,4 +22,6 @@ def get_active_reminder(db: Session, garage_id: int, phone: str) -> Reminder | N
 def mark_reminder_accepted(db: Session, reminder: Reminder) -> None:
     """Transition a reminder to ACCEPTED status."""
     reminder.status = "ACCEPTED"
+    reminder.responded_at = datetime.utcnow()
     db.commit()
+

@@ -1,7 +1,7 @@
 """Deterministic auto-booking triggered by reminder reply keywords."""
 
 import logging
-from datetime import time
+from datetime import datetime, time
 
 from sqlalchemy.orm import Session
 
@@ -10,10 +10,7 @@ from garage_agent.services.booking_service import (
     create_booking,
     get_or_create_customer_by_phone,
 )
-from garage_agent.services.reminder_service import (
-    get_active_reminder,
-    mark_reminder_accepted,
-)
+from garage_agent.services.reminder_service import get_active_reminder
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +46,10 @@ def auto_book_from_reminder(
         service_time=DEFAULT_SERVICE_TIME,
     )
 
-    mark_reminder_accepted(db=db, reminder=reminder)
+    reminder.status = "AUTO_BOOKED"
+    reminder.responded_at = datetime.utcnow()
+    reminder.booking_id = booking.id
+    db.commit()
 
     logger.info(
         "Auto-booked from reminder: booking_id=%s, phone=%s, garage_id=%s",
@@ -59,3 +59,4 @@ def auto_book_from_reminder(
     )
 
     return booking
+

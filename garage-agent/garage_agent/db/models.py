@@ -358,3 +358,12 @@ class Reminder(Base):
         nullable=False,
         server_default=func.now(),
     )
+
+    responded_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    booking_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("bookings.id"),
+        nullable=True,
+    )
