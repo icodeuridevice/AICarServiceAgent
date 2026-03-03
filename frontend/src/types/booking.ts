@@ -5,5 +5,6 @@ export interface Booking {
     vehicle_number: string;
     service_type: string;
     service_date: string;
+    service_time?: string;
     status: string;
 }

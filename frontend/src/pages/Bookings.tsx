@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { fetchBookings } from "../api/bookings";
 import type { Booking } from "../types/booking";
+import RescheduleModal from "../components/RescheduleModal";
 
 const getStatusClassName = (status: string): string => {
     switch (status) {
@@ -17,46 +18,47 @@ const getStatusClassName = (status: string): string => {
     }
 };
 
+const canReschedule = (status: string): boolean => {
+    return status === "PENDING" || status === "CONFIRMED";
+};
+
 export default function Bookings() {
     const [bookings, setBookings] = useState<Booking[]>([]);
     const [loading, setLoading] = useState<boolean>(true);
     const [error, setError] = useState<string>("");
+    const [selectedBookingForReschedule, setSelectedBookingForReschedule] = useState<Booking | null>(null);
+    const [showModal, setShowModal] = useState<boolean>(false);
+
+    const loadBookings = useCallback(async (): Promise<void> => {
+        try {
+            setLoading(true);
+            setError("");
+            const data = await fetchBookings();
+            setBookings(data);
+        } catch (err: unknown) {
+            if (err instanceof Error && err.message) {
+                setError(err.message);
+            } else {
+                setError("Failed to fetch bookings.");
+            }
+        } finally {
+            setLoading(false);
+        }
+    }, []);
 
     useEffect(() => {
-        let isMounted = true;
-
-        const loadBookings = async () => {
-            try {
-                setLoading(true);
-                setError("");
-                const data = await fetchBookings();
-
-                if (isMounted) {
-                    setBookings(data);
-                }
-            } catch (err: unknown) {
-                if (!isMounted) {
-                    return;
-                }
-
-                if (err instanceof Error && err.message) {
-                    setError(err.message);
-                } else {
-                    setError("Failed to fetch bookings.");
-                }
-            } finally {
-                if (isMounted) {
-                    setLoading(false);
-                }
-            }
-        };
-
         void loadBookings();
+    }, [loadBookings]);
 
-        return () => {
-            isMounted = false;
-        };
-    }, []);
+    const handleOpenReschedule = (booking: Booking): void => {
+        setSelectedBookingForReschedule(booking);
+        setShowModal(true);
+    };
+
+    const handleCloseReschedule = (): void => {
+        setShowModal(false);
+        setSelectedBookingForReschedule(null);
+    };
 
     if (loading) {
         return <p>Loading...</p>;
@@ -78,6 +80,7 @@ export default function Bookings() {
                         <th className="px-4 py-3 font-medium">Service</th>
                         <th className="px-4 py-3 font-medium">Date</th>
                         <th className="px-4 py-3 font-medium">Status</th>
+                        <th className="px-4 py-3 font-medium">Actions</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -96,17 +99,41 @@ export default function Bookings() {
                                     {booking.status}
                                 </span>
                             </td>
+                            <td className="px-4 py-3">
+                                <button
+                                    className="text-xs bg-gray-800 text-white px-3 py-1 rounded hover:bg-black disabled:opacity-50 disabled:cursor-not-allowed"
+                                    type="button"
+                                    disabled={!canReschedule(booking.status)}
+                                    title={
+                                        canReschedule(booking.status)
+                                            ? "Reschedule booking"
+                                            : "Only PENDING or CONFIRMED bookings can be rescheduled"
+                                    }
+                                    onClick={() => handleOpenReschedule(booking)}
+                                >
+                                    Reschedule
+                                </button>
+                            </td>
                         </tr>
                     ))}
                     {bookings.length === 0 && (
                         <tr className="border-t">
-                            <td className="px-4 py-3 text-gray-500" colSpan={7}>
+                            <td className="px-4 py-3 text-gray-500" colSpan={8}>
                                 No bookings found.
                             </td>
                         </tr>
                     )}
                 </tbody>
             </table>
+            {showModal && selectedBookingForReschedule && (
+                <RescheduleModal
+                    bookingId={selectedBookingForReschedule.id}
+                    currentDate={selectedBookingForReschedule.service_date}
+                    currentTime={selectedBookingForReschedule.service_time}
+                    onClose={handleCloseReschedule}
+                    onSuccess={loadBookings}
+                />
+            )}
         </div>
     );
 }
