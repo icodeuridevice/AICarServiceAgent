@@ -1,16 +1,8 @@
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import Login from "./pages/Login";
 import ProtectedRoute from "./auth/ProtectedRoute";
-
-function DashboardPlaceholder() {
-  return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-50">
-      <h1 className="text-2xl font-semibold text-gray-800">
-        Dashboard (Coming Soon)
-      </h1>
-    </div>
-  );
-}
+import DashboardLayout from "./layouts/DashboardLayout";
+import Dashboard from "./pages/Dashboard";
 
 function App() {
   return (
@@ -21,7 +13,9 @@ function App() {
           path="/dashboard"
           element={
             <ProtectedRoute>
-              <DashboardPlaceholder />
+              <DashboardLayout title="Dashboard">
+                <Dashboard />
+              </DashboardLayout>
             </ProtectedRoute>
           }
         />
