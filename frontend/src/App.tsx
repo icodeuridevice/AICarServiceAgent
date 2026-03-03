@@ -1,5 +1,6 @@
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import Login from "./pages/Login";
+import ProtectedRoute from "./auth/ProtectedRoute";
 
 function DashboardPlaceholder() {
   return (
@@ -16,7 +17,14 @@ function App() {
     <BrowserRouter>
       <Routes>
         <Route path="/login" element={<Login />} />
-        <Route path="/dashboard" element={<DashboardPlaceholder />} />
+        <Route
+          path="/dashboard"
+          element={
+            <ProtectedRoute>
+              <DashboardPlaceholder />
+            </ProtectedRoute>
+          }
+        />
         {/* Redirect root to login by default */}
         <Route path="/" element={<Navigate to="/login" replace />} />
       </Routes>

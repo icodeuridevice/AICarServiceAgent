@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import apiClient from "../api/client";
+import { setToken } from "../auth/auth";
 
 export default function Login() {
     const [email, setEmail] = useState("");
@@ -22,7 +23,7 @@ export default function Login() {
 
             if (response.data?.success) {
                 const token = response.data.data.access_token;
-                localStorage.setItem("access_token", token);
+                setToken(token);
                 navigate("/dashboard");
             } else {
                 setError(response.data?.message || "Login failed");
