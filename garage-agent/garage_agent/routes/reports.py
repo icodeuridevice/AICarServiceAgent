@@ -4,8 +4,9 @@ from datetime import date
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
-from garage_agent.db.bootstrap import resolve_default_garage_context
+from garage_agent.db.models import User
 from garage_agent.db.session import SessionLocal
+from garage_agent.core.security import require_role
 from garage_agent.services.report_service import get_daily_summary
 
 
@@ -26,11 +27,12 @@ def daily_report(
         default=None,
         description="Date in YYYY-MM-DD format",
     ),
+    current_user: User = Depends(require_role("OWNER")),
     db: Session = Depends(get_db),
 ):
-    garage_id = resolve_default_garage_context(db=db).garage_id
     return get_daily_summary(
         db=db,
-        garage_id=garage_id,
+        garage_id=current_user.garage_id,
         target_date=report_date,
     )
+

@@ -12,7 +12,7 @@ from garage_agent.db.bootstrap import (
 from garage_agent.db.session import get_db
 from garage_agent.db.models import Booking, Customer, User, Vehicle
 from garage_agent.services.booking_service import update_booking_status
-from garage_agent.core.security import get_current_user
+from garage_agent.core.security import require_role, require_staff
 
 from garage_agent.schemas.common import APIResponse
 from garage_agent.schemas.booking import BookingSummaryResponse
@@ -123,7 +123,7 @@ def list_todays_bookings(db: Session = Depends(get_db)):
 
 @router.get("/summary", response_model=APIResponse[BookingSummaryResponse])
 def bookings_summary(
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role("OWNER")),
     db: Session = Depends(get_db),
 ):
     garage_id = current_user.garage_id
@@ -151,8 +151,13 @@ def bookings_summary(
     )
 
 @router.patch("/{booking_id}/status", response_model=APIResponse[BookingStatusResponse])
-def update_status(booking_id: int, payload: StatusUpdate, db: Session = Depends(get_db)):
-    garage_id = _resolve_route_garage_id(db=db)
+def update_status(
+    booking_id: int,
+    payload: StatusUpdate,
+    current_user: User = Depends(require_staff),
+    db: Session = Depends(get_db),
+):
+    garage_id = current_user.garage_id
     new_status = payload.status.upper()
 
     if new_status not in ALLOWED_STATUSES:
@@ -177,9 +182,10 @@ def update_status(booking_id: int, payload: StatusUpdate, db: Session = Depends(
 @router.put("/reschedule", response_model=APIResponse[RescheduleResponse])
 def reschedule_booking(
     payload: RescheduleRequest,
+    current_user: User = Depends(require_staff),
     db: Session = Depends(get_db),
 ):
-    garage_id = _resolve_route_garage_id(db=db)
+    garage_id = current_user.garage_id
     from garage_agent.services.booking_service import reschedule_booking as reschedule_engine
 
     booking = reschedule_engine(
@@ -204,9 +210,10 @@ def reschedule_booking(
 @router.patch("/{booking_id}/cancel", response_model=APIResponse[CancelResponse])
 def cancel(
     booking_id: int,
+    current_user: User = Depends(require_staff),
     db: Session = Depends(get_db),
 ):
-    garage_id = _resolve_route_garage_id(db=db)
+    garage_id = current_user.garage_id
     from garage_agent.services.booking_service import cancel_booking
 
     booking = cancel_booking(db=db, garage_id=garage_id, booking_id=booking_id)
