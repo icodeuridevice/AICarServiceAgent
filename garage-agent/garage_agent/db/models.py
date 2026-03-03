@@ -58,6 +58,49 @@ class Garage(Base):
         back_populates="garage",
         overlaps="booking,job_card",
     )
+    users: Mapped[list["User"]] = relationship(back_populates="garage")
+
+
+class User(Base):
+    """Represents an authenticated user (garage owner or staff)."""
+
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(primary_key=True, index=True)
+    garage_id: Mapped[int] = mapped_column(
+        ForeignKey("garages.id"),
+        nullable=False,
+        index=True,
+    )
+
+    email: Mapped[str] = mapped_column(
+        String(255),
+        unique=True,
+        index=True,
+        nullable=False,
+    )
+    hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
+
+    role: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="OWNER",
+        server_default=text("'OWNER'"),
+    )
+    is_active: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+        server_default=text("1"),
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    garage: Mapped["Garage"] = relationship(back_populates="users")
 
 
 class Customer(Base):

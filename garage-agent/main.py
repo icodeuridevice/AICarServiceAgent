@@ -20,6 +20,7 @@ from garage_agent.scheduler.reminder_scheduler import start_scheduler
 from garage_agent.routes import webhook, bookings, twilio_webhook
 from garage_agent.routes import jobcards
 from garage_agent.routes.reports import router as reports_router
+from garage_agent.routes.auth import router as auth_router
 
 from fastapi import HTTPException
 from garage_agent.core.exceptions import http_exception_handler
@@ -83,6 +84,7 @@ app.include_router(bookings.router)
 app.include_router(twilio_webhook.router)
 app.include_router(jobcards.router)
 app.include_router(reports_router)
+app.include_router(auth_router)
 app.add_exception_handler(HTTPException, http_exception_handler)
 app.add_exception_handler(DomainException, domain_exception_handler)
 

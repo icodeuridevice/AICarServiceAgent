@@ -17,11 +17,14 @@ h11==0.16.0
 idna==3.11
 multidict==6.7.1
 openai>=1.0.0
+passlib[bcrypt]>=1.7.4
+bcrypt==4.0.1
 propcache==0.4.1
-pydantic==2.12.5
+pydantic[email]==2.12.5
 pydantic_core==2.41.5
 PyJWT==2.11.0
 python-dotenv==1.2.1
+python-jose[cryptography]>=3.3.0
 python-multipart==0.0.22
 requests==2.32.5
 SQLAlchemy==2.0.46
@@ -33,3 +36,4 @@ tzlocal==5.3.1
 urllib3==2.6.3
 uvicorn==0.41.0
 yarl==1.22.0
+

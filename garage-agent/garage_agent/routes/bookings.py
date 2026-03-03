@@ -10,8 +10,9 @@ from garage_agent.db.bootstrap import (
     resolve_garage_from_phone,
 )
 from garage_agent.db.session import get_db
-from garage_agent.db.models import Booking, Customer, Vehicle
+from garage_agent.db.models import Booking, Customer, User, Vehicle
 from garage_agent.services.booking_service import update_booking_status
+from garage_agent.core.security import get_current_user
 
 from garage_agent.schemas.common import APIResponse
 from garage_agent.schemas.booking import BookingSummaryResponse
@@ -121,8 +122,11 @@ def list_todays_bookings(db: Session = Depends(get_db)):
 
 
 @router.get("/summary", response_model=APIResponse[BookingSummaryResponse])
-def bookings_summary(db: Session = Depends(get_db)):
-    garage_id = _resolve_route_garage_id(db=db)
+def bookings_summary(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    garage_id = current_user.garage_id
     counts_by_status = {status.lower(): 0 for status in ALLOWED_STATUSES}
 
     rows = db.execute(

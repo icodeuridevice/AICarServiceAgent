@@ -242,6 +242,49 @@ def init_db() -> None:
             columns=["garage_id", "phone"],
             where_clause="phone IS NOT NULL AND TRIM(phone) <> ''",
         )
+
+        # Users table migration (Phase 9.1)
+        _ensure_column(
+            table_name="users",
+            column_name="garage_id",
+            column_ddl="garage_id INTEGER NOT NULL DEFAULT 1 REFERENCES garages(id)",
+        )
+        _ensure_column(
+            table_name="users",
+            column_name="email",
+            column_ddl="email VARCHAR(255) NOT NULL DEFAULT ''",
+        )
+        _ensure_column(
+            table_name="users",
+            column_name="hashed_password",
+            column_ddl="hashed_password VARCHAR(255) NOT NULL DEFAULT ''",
+        )
+        _ensure_column(
+            table_name="users",
+            column_name="role",
+            column_ddl="role VARCHAR(32) NOT NULL DEFAULT 'OWNER'",
+        )
+        _ensure_column(
+            table_name="users",
+            column_name="is_active",
+            column_ddl="is_active BOOLEAN NOT NULL DEFAULT 1",
+        )
+        _ensure_column(
+            table_name="users",
+            column_name="created_at",
+            column_ddl="created_at DATETIME",
+        )
+        _ensure_index(
+            table_name="users",
+            index_name="ix_users_garage_id",
+            columns=["garage_id"],
+        )
+        _ensure_unique_index_if_clean(
+            table_name="users",
+            index_name="uq_users_email",
+            columns=["email"],
+            where_clause="email IS NOT NULL AND TRIM(email) <> ''",
+        )
     except SQLAlchemyError:
         logger.exception("Database initialization failed.")
         raise
