@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from garage_agent.db.models import User
 from garage_agent.db.session import get_db
 from garage_agent.core.security import require_staff
+from garage_agent.core.response import success_response
 from garage_agent.services.jobcard_service import (
     create_job_card,
     update_job_card,
@@ -31,7 +32,7 @@ def api_create_job_card(
             technician_name=technician_name,
             garage_id=current_user.garage_id,
         )
-        return {"jobcard_id": job.id, "status": job.status}
+        return success_response(data={"jobcard_id": job.id, "status": job.status})
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -54,7 +55,7 @@ def api_update_job_card(
             total_cost=total_cost,
             garage_id=current_user.garage_id,
         )
-        return {"jobcard_id": job.id, "status": job.status}
+        return success_response(data={"jobcard_id": job.id, "status": job.status})
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -71,7 +72,7 @@ def api_complete_job_card(
             jobcard_id=jobcard_id,
             garage_id=current_user.garage_id,
         )
-        return {"jobcard_id": job.id, "status": job.status}
+        return success_response(data={"jobcard_id": job.id, "status": job.status})
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -82,15 +83,15 @@ def api_list_active_job_cards(
     db: Session = Depends(get_db),
 ):
     jobs = list_active_job_cards(db=db, garage_id=current_user.garage_id)
-    return [
+    return success_response(data=[
         {
             "id": job.id,
             "booking_id": job.booking_id,
             "technician_name": job.technician_name,
-            "started_at": job.started_at,
+            "started_at": str(job.started_at) if job.started_at else None,
         }
         for job in jobs
-    ]
+    ])
 
 
 @router.get("/booking/{booking_id}")
@@ -106,10 +107,11 @@ def api_get_job_by_booking(
     )
     if job is None:
         raise HTTPException(status_code=404, detail="Job card not found.")
-    return {
+    return success_response(data={
         "id": job.id,
         "status": job.status,
         "technician_name": job.technician_name,
         "total_cost": job.total_cost,
-    }
+    })
+
 

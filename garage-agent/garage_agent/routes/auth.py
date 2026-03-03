@@ -40,9 +40,10 @@ class UserCreatedResponse(BaseModel):
 # ── Endpoints ─────────────────────────────────────────────────────────
 
 from garage_agent.core.limiter import limiter
+from garage_agent.core.response import success_response
 
 
-@router.post("/login", response_model=TokenResponse)
+@router.post("/login")
 @limiter.limit("5/minute")
 def login(request: Request, payload: LoginRequest, db: Session = Depends(get_db)):
     """Authenticate and return a JWT access token."""
@@ -55,10 +56,13 @@ def login(request: Request, payload: LoginRequest, db: Session = Depends(get_db)
         )
 
     token = create_access_token(data={"sub": str(user.id), "garage_id": user.garage_id})
-    return TokenResponse(access_token=token)
+    return success_response(
+        data={"access_token": token, "token_type": "bearer"},
+        message="Login successful",
+    )
 
 
-@router.post("/register", response_model=UserCreatedResponse, status_code=201)
+@router.post("/register", status_code=201)
 def register(payload: RegisterRequest, db: Session = Depends(get_db)):
     """Create a new user account."""
     user = create_user(
@@ -68,9 +72,13 @@ def register(payload: RegisterRequest, db: Session = Depends(get_db)):
         password=payload.password,
         role=payload.role,
     )
-    return UserCreatedResponse(
-        id=user.id,
-        garage_id=user.garage_id,
-        email=user.email,
-        role=user.role,
+    return success_response(
+        data={
+            "id": user.id,
+            "garage_id": user.garage_id,
+            "email": user.email,
+            "role": user.role,
+        },
+        message="User registered successfully",
     )
+

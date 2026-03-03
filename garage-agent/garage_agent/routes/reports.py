@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from garage_agent.db.models import User
 from garage_agent.db.session import SessionLocal
 from garage_agent.core.security import require_role
+from garage_agent.core.response import success_response
 from garage_agent.services.report_service import get_daily_summary
 
 
@@ -30,9 +31,10 @@ def daily_report(
     current_user: User = Depends(require_role("OWNER")),
     db: Session = Depends(get_db),
 ):
-    return get_daily_summary(
+    data = get_daily_summary(
         db=db,
         garage_id=current_user.garage_id,
         target_date=report_date,
     )
+    return success_response(data=data)
 

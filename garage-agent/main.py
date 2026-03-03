@@ -73,6 +73,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         logger.info("Reminder scheduler shut down.")
 
 from garage_agent.core.limiter import limiter
+from garage_agent.core.response import error_response
 
 app = FastAPI(
     title="Garage Agent API",
@@ -86,7 +87,10 @@ app.add_exception_handler(
     RateLimitExceeded,
     lambda request, exc: JSONResponse(
         status_code=429,
-        content={"detail": "Rate limit exceeded"},
+        content=error_response(
+            code="RATE_LIMIT_EXCEEDED",
+            message="Rate limit exceeded",
+        ),
     ),
 )
 
@@ -101,7 +105,22 @@ app.include_router(auth_router)
 app.add_exception_handler(HTTPException, http_exception_handler)
 app.add_exception_handler(DomainException, domain_exception_handler)
 
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request, exc: Exception):
+    """Catch-all for unhandled errors – returns a standard JSON envelope."""
+    logger.exception("Unhandled exception")
+    return JSONResponse(
+        status_code=500,
+        content=error_response(
+            code="INTERNAL_SERVER_ERROR",
+            message="An unexpected error occurred.",
+        ),
+    )
+
+
 @app.get("/", tags=["health"])
 def root() -> dict[str, str]:
     """Simple status endpoint for uptime checks."""
     return {"status": "Garage Agent Running"}
+
