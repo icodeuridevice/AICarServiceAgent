@@ -12,6 +12,8 @@ from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
 
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
+from slowapi.errors import RateLimitExceeded
 
 from garage_agent.db.init_db import init_db
 from garage_agent.db.bootstrap import get_default_garage
@@ -70,11 +72,22 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         scheduler.shutdown(wait=False)
         logger.info("Reminder scheduler shut down.")
 
+from garage_agent.core.limiter import limiter
+
 app = FastAPI(
     title="Garage Agent API",
     version="0.1.0",
     description="AI-enabled garage booking backend foundation.",
     lifespan=lifespan,
+)
+
+app.state.limiter = limiter
+app.add_exception_handler(
+    RateLimitExceeded,
+    lambda request, exc: JSONResponse(
+        status_code=429,
+        content={"detail": "Rate limit exceeded"},
+    ),
 )
 
 app.add_middleware(RequestContextMiddleware)

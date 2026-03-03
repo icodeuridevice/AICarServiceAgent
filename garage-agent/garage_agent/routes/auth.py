@@ -1,6 +1,6 @@
 """Authentication routes – login and registration."""
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
 
@@ -39,8 +39,12 @@ class UserCreatedResponse(BaseModel):
 
 # ── Endpoints ─────────────────────────────────────────────────────────
 
+from garage_agent.core.limiter import limiter
+
+
 @router.post("/login", response_model=TokenResponse)
-def login(payload: LoginRequest, db: Session = Depends(get_db)):
+@limiter.limit("5/minute")
+def login(request: Request, payload: LoginRequest, db: Session = Depends(get_db)):
     """Authenticate and return a JWT access token."""
     user = authenticate_user(db=db, email=payload.email, password=payload.password)
     if user is None:

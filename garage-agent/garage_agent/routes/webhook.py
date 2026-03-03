@@ -25,6 +25,8 @@ from garage_agent.services.booking_service import create_booking, get_or_create_
 from garage_agent.services.extractor import extract_booking_details
 from garage_agent.ai.adapter import get_ai_engine
 
+from garage_agent.core.limiter import limiter
+
 router = APIRouter(tags=["webhook"])
 logger = logging.getLogger(__name__)
 
@@ -98,6 +100,7 @@ def _parse_service_time(raw_time: str | None) -> time | None:
 
 
 @router.post("/webhook")
+@limiter.limit("30/minute")
 async def receive_webhook(
     request: Request,
     db: Session = Depends(get_db),
