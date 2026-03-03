@@ -2,6 +2,9 @@ import { useCallback, useEffect, useState } from "react";
 import { fetchBookings } from "../api/bookings";
 import type { Booking } from "../types/booking";
 import RescheduleModal from "../components/RescheduleModal";
+import LoadingSpinner from "../components/LoadingSpinner";
+import ErrorBanner from "../components/ErrorBanner";
+import EmptyState from "../components/EmptyState";
 
 const getStatusClassName = (status: string): string => {
     switch (status) {
@@ -61,11 +64,20 @@ export default function Bookings() {
     };
 
     if (loading) {
-        return <p>Loading...</p>;
+        return <LoadingSpinner />;
     }
 
     if (error) {
-        return <p className="text-red-600">{error}</p>;
+        return <ErrorBanner message={error} />;
+    }
+
+    if (bookings.length === 0) {
+        return (
+            <EmptyState
+                title="No bookings found"
+                description="There are currently no bookings to display."
+            />
+        );
     }
 
     return (
@@ -116,13 +128,6 @@ export default function Bookings() {
                             </td>
                         </tr>
                     ))}
-                    {bookings.length === 0 && (
-                        <tr className="border-t">
-                            <td className="px-4 py-3 text-gray-500" colSpan={8}>
-                                No bookings found.
-                            </td>
-                        </tr>
-                    )}
                 </tbody>
             </table>
             {showModal && selectedBookingForReschedule && (

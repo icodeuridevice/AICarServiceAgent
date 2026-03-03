@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { fetchBookings } from "../api/bookings";
 import type { Booking } from "../types/booking";
+import LoadingSpinner from "../components/LoadingSpinner";
+import ErrorBanner from "../components/ErrorBanner";
+import EmptyState from "../components/EmptyState";
 
 const getStatusClassName = (status: string): string => {
     switch (status) {
@@ -97,15 +100,24 @@ export default function Reminders() {
     }, [bookings]);
 
     const handleSendReminder = (): void => {
-        console.log("Reminder triggered");
+        return;
     };
 
     if (loading) {
-        return <p>Loading...</p>;
+        return <LoadingSpinner />;
     }
 
     if (error) {
-        return <p className="text-red-600">{error}</p>;
+        return <ErrorBanner message={error} />;
+    }
+
+    if (upcomingBookings.length === 0) {
+        return (
+            <EmptyState
+                title="No upcoming bookings"
+                description="There are no bookings in the next 7 days."
+            />
+        );
     }
 
     return (
@@ -159,13 +171,6 @@ export default function Reminders() {
                             </tr>
                         );
                     })}
-                    {upcomingBookings.length === 0 && (
-                        <tr className="border-t">
-                            <td className="px-4 py-3 text-gray-500" colSpan={6}>
-                                No upcoming bookings in the next 7 days.
-                            </td>
-                        </tr>
-                    )}
                 </tbody>
             </table>
         </div>

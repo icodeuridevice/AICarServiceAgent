@@ -10,6 +10,9 @@ import {
 import type { Booking } from "../types/booking";
 import type { JobCard } from "../types/jobcard";
 import { formatINR } from "../utils/format";
+import LoadingSpinner from "../components/LoadingSpinner";
+import ErrorBanner from "../components/ErrorBanner";
+import EmptyState from "../components/EmptyState";
 
 const getStatusClassName = (status: string): string => {
     switch (status) {
@@ -178,11 +181,11 @@ export default function JobCards() {
     };
 
     if (loading) {
-        return <p>Loading...</p>;
+        return <LoadingSpinner />;
     }
 
     if (error) {
-        return <p className="text-red-600">{error}</p>;
+        return <ErrorBanner message={error} />;
     }
 
     return (
@@ -204,70 +207,68 @@ export default function JobCards() {
                 </button>
             </div>
 
-            {operationError && (
-                <p className="text-sm text-red-600">{operationError}</p>
-            )}
+            {operationError && <ErrorBanner message={operationError} />}
 
-            <div className="bg-white border rounded-md overflow-hidden">
-                <table className="w-full text-sm">
-                    <thead className="bg-gray-50 text-left text-gray-600">
-                        <tr>
-                            <th className="px-4 py-3 font-medium">ID</th>
-                            <th className="px-4 py-3 font-medium">Booking ID</th>
-                            <th className="px-4 py-3 font-medium">Technician</th>
-                            <th className="px-4 py-3 font-medium">Status</th>
-                            <th className="px-4 py-3 font-medium">Cost</th>
-                            <th className="px-4 py-3 font-medium">Completed</th>
-                            <th className="px-4 py-3 font-medium">Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {jobcards.map((jobcard) => (
-                            <tr key={jobcard.id} className="border-t hover:bg-gray-50">
-                                <td className="px-4 py-3 text-gray-700">{jobcard.id}</td>
-                                <td className="px-4 py-3 text-gray-700">{jobcard.booking_id}</td>
-                                <td className="px-4 py-3 text-gray-700">
-                                    {jobcard.technician_name ?? "-"}
-                                </td>
-                                <td className="px-4 py-3">
-                                    <span
-                                        className={`inline-flex px-2 py-1 rounded text-xs font-medium ${getStatusClassName(jobcard.status)}`}
-                                    >
-                                        {jobcard.status}
-                                    </span>
-                                </td>
-                                <td className="px-4 py-3 text-gray-700">
-                                    {jobcard.total_cost === null ? "-" : formatINR(jobcard.total_cost)}
-                                </td>
-                                <td className="px-4 py-3 text-gray-700">
-                                    {formatCompletedAt(jobcard.completed_at)}
-                                </td>
-                                <td className="px-4 py-3">
-                                    {jobcard.status !== "COMPLETED" ? (
-                                        <button
-                                            className="text-xs bg-gray-800 text-white px-3 py-1 rounded hover:bg-black disabled:opacity-50 disabled:cursor-not-allowed"
-                                            type="button"
-                                            onClick={() => void handleCompleteJobCard(jobcard.id)}
-                                            disabled={completingJobcardId === jobcard.id}
+            {jobcards.length === 0 ? (
+                <EmptyState
+                    title="No active job cards found"
+                    description="Create a new job card from an eligible booking to get started."
+                />
+            ) : (
+                <div className="bg-white border rounded-md overflow-hidden">
+                    <table className="w-full text-sm">
+                        <thead className="bg-gray-50 text-left text-gray-600">
+                            <tr>
+                                <th className="px-4 py-3 font-medium">ID</th>
+                                <th className="px-4 py-3 font-medium">Booking ID</th>
+                                <th className="px-4 py-3 font-medium">Technician</th>
+                                <th className="px-4 py-3 font-medium">Status</th>
+                                <th className="px-4 py-3 font-medium">Cost</th>
+                                <th className="px-4 py-3 font-medium">Completed</th>
+                                <th className="px-4 py-3 font-medium">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {jobcards.map((jobcard) => (
+                                <tr key={jobcard.id} className="border-t hover:bg-gray-50">
+                                    <td className="px-4 py-3 text-gray-700">{jobcard.id}</td>
+                                    <td className="px-4 py-3 text-gray-700">{jobcard.booking_id}</td>
+                                    <td className="px-4 py-3 text-gray-700">
+                                        {jobcard.technician_name ?? "-"}
+                                    </td>
+                                    <td className="px-4 py-3">
+                                        <span
+                                            className={`inline-flex px-2 py-1 rounded text-xs font-medium ${getStatusClassName(jobcard.status)}`}
                                         >
-                                            {completingJobcardId === jobcard.id ? "Completing..." : "Complete"}
-                                        </button>
-                                    ) : (
-                                        <span className="text-xs text-gray-500">-</span>
-                                    )}
-                                </td>
-                            </tr>
-                        ))}
-                        {jobcards.length === 0 && (
-                            <tr className="border-t">
-                                <td className="px-4 py-3 text-gray-500" colSpan={7}>
-                                    No active job cards found.
-                                </td>
-                            </tr>
-                        )}
-                    </tbody>
-                </table>
-            </div>
+                                            {jobcard.status}
+                                        </span>
+                                    </td>
+                                    <td className="px-4 py-3 text-gray-700">
+                                        {jobcard.total_cost === null ? "-" : formatINR(jobcard.total_cost)}
+                                    </td>
+                                    <td className="px-4 py-3 text-gray-700">
+                                        {formatCompletedAt(jobcard.completed_at)}
+                                    </td>
+                                    <td className="px-4 py-3">
+                                        {jobcard.status !== "COMPLETED" ? (
+                                            <button
+                                                className="text-xs bg-gray-800 text-white px-3 py-1 rounded hover:bg-black disabled:opacity-50 disabled:cursor-not-allowed"
+                                                type="button"
+                                                onClick={() => void handleCompleteJobCard(jobcard.id)}
+                                                disabled={completingJobcardId === jobcard.id}
+                                            >
+                                                {completingJobcardId === jobcard.id ? "Completing..." : "Complete"}
+                                            </button>
+                                        ) : (
+                                            <span className="text-xs text-gray-500">-</span>
+                                        )}
+                                    </td>
+                                </tr>
+                            ))}
+                        </tbody>
+                    </table>
+                </div>
+            )}
 
             {showCreateModal && (
                 <div className="fixed inset-0 bg-black bg-opacity-40 flex items-center justify-center">
@@ -303,7 +304,11 @@ export default function JobCards() {
                                 placeholder="Enter technician name"
                             />
                         </div>
-                        {operationError && <p className="text-xs text-red-600 mt-2">{operationError}</p>}
+                        {operationError && (
+                            <div className="mt-3">
+                                <ErrorBanner message={operationError} />
+                            </div>
+                        )}
                         <div className="mt-5 flex justify-end gap-2">
                             <button
                                 className="px-3 py-1 rounded border text-sm text-gray-700 hover:bg-gray-100"

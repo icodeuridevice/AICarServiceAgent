@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { fetchDailyReport } from "../api/reports";
 import type { DailyReport } from "../types/report";
 import { formatINR } from "../utils/format";
+import ErrorBanner from "../components/ErrorBanner";
 
 export default function Dashboard() {
     const [report, setReport] = useState<DailyReport | null>(null);
@@ -55,7 +56,7 @@ export default function Dashboard() {
     }
 
     if (error) {
-        return <p className="text-red-600">{error}</p>;
+        return <ErrorBanner message={error} />;
     }
 
     if (!report) {

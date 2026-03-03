@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import apiClient from "../api/client";
 import { setToken } from "../auth/auth";
+import ErrorBanner from "../components/ErrorBanner";
 
 export default function Login() {
     const [email, setEmail] = useState("");
@@ -47,8 +48,8 @@ export default function Login() {
                 <h1 className="text-2xl font-semibold text-gray-800 mb-6">Login</h1>
 
                 {error && (
-                    <div className="mb-4 text-red-600 bg-red-50 p-3 rounded-md border border-red-200">
-                        {error}
+                    <div className="mb-4">
+                        <ErrorBanner message={error} />
                     </div>
                 )}
 

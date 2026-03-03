@@ -1,6 +1,7 @@
 import { useState } from "react";
 import axios from "axios";
 import { rescheduleBooking } from "../api/bookings";
+import ErrorBanner from "./ErrorBanner";
 
 interface RescheduleModalProps {
     bookingId: number;
@@ -113,7 +114,11 @@ export default function RescheduleModal({
                         onChange={(event) => setNewDate(event.target.value)}
                     />
                 </div>
-                {error && <p className="text-xs text-red-600 mt-2">{error}</p>}
+                {error && (
+                    <div className="mt-3">
+                        <ErrorBanner message={error} />
+                    </div>
+                )}
                 <div className="mt-5 flex justify-end gap-2">
                     <button
                         className="px-3 py-1 rounded border text-sm text-gray-700 hover:bg-gray-100"
