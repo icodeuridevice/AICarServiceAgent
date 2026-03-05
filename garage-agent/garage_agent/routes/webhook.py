@@ -2,18 +2,23 @@
 
 Transport layer only.
 Conversation + booking logic delegated to services.
+
+Async architecture:
+  1. Webhook returns an immediate TwiML acknowledgement (<1 s)
+  2. AI processing runs in a FastAPI BackgroundTask
+  3. Final reply is delivered via the Twilio REST API
 """
 
 import logging
 from datetime import date, datetime, time, timedelta
 from xml.sax.saxutils import escape
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, Request
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
 from garage_agent.db.bootstrap import resolve_garage_from_phone
-from garage_agent.db.session import get_db
+from garage_agent.db.session import get_db, SessionLocal
 from garage_agent.services.conversation_service import (
     clear_state,
     get_data,
@@ -23,12 +28,29 @@ from garage_agent.services.conversation_service import (
 )
 from garage_agent.services.booking_service import create_booking, get_or_create_customer_by_phone
 from garage_agent.services.extractor import extract_booking_details
+from garage_agent.services.twilio_client import send_whatsapp_message
 from garage_agent.ai.adapter import get_ai_engine
 
 from garage_agent.core.limiter import limiter
 
 router = APIRouter(tags=["webhook"])
 logger = logging.getLogger(__name__)
+
+# -------------------------------------------------------------------
+# Immediate TwiML acknowledge message
+# -------------------------------------------------------------------
+
+_IMMEDIATE_ACK = (
+    '<?xml version="1.0" encoding="UTF-8"?>\n'
+    "<Response>\n"
+    "    <Message>Processing your request...</Message>\n"
+    "</Response>"
+)
+
+_EMPTY_TWIML = (
+    '<?xml version="1.0" encoding="UTF-8"?>\n'
+    "<Response />"
+)
 
 
 # -------------------------------------------------------------------
@@ -94,6 +116,89 @@ def _parse_service_time(raw_time: str | None) -> time | None:
     return None
 
 
+def _send_reply(phone: str, text: str) -> None:
+    """Send a WhatsApp reply via Twilio REST API (best-effort)."""
+    try:
+        send_whatsapp_message(to=phone, body=text)
+    except Exception:
+        logger.exception(
+            "event=twilio_send phase=error phone=%s reply_length=%d",
+            phone,
+            len(text),
+        )
+
+
+# -------------------------------------------------------------------
+# Background AI processing (runs after immediate TwiML response)
+# -------------------------------------------------------------------
+
+
+def _process_ai_in_background(phone: str, incoming_message: str, garage_id: int) -> None:
+    """
+    Run the full AI agent pipeline and deliver the reply via Twilio
+    REST API.  This function is executed as a FastAPI BackgroundTask,
+    meaning it runs *after* the webhook has already returned
+    an immediate TwiML response to Twilio.
+
+    A fresh DB session is created and closed within this function
+    since BackgroundTasks run outside the request lifecycle.
+    """
+    logger.info(
+        "event=background_ai phase=start phone=%s garage_id=%s",
+        phone,
+        garage_id,
+    )
+
+    db: Session = SessionLocal()
+    try:
+        ai_engine = get_ai_engine()
+        selected_engine = "llm" if ai_engine.__class__.__name__ == "LLMEngine" else "rule"
+
+        try:
+            raw_ai_response = ai_engine.process(
+                db=db,
+                garage_id=garage_id,
+                phone=phone,
+                message=incoming_message,
+            )
+        except Exception as exc:
+            logger.exception("event=background_ai phase=ai_error phone=%s", phone)
+            raw_ai_response = {
+                "engine": selected_engine,
+                "type": "conversation",
+                "reply": f"Request processed. (AI error: {exc})",
+                "tool": None,
+                "arguments": None,
+                "result": {"error": str(exc)},
+            }
+
+        ai_response = raw_ai_response if isinstance(raw_ai_response, dict) else {}
+
+        if not isinstance(raw_ai_response, dict):
+            logger.warning("AI engine returned non-dict response: %r", raw_ai_response)
+            ai_response = {
+                "engine": selected_engine,
+                "type": "conversation",
+                "reply": "Request processed.",
+                "tool": None,
+                "arguments": None,
+                "result": {"error": "invalid_ai_response"},
+            }
+
+        logger.info("event=background_ai phase=ai_complete AI Output: %s", ai_response)
+
+        reply = ai_response.get("reply") or "Request processed."
+        _send_reply(phone, reply)
+
+        logger.info(
+            "event=background_ai phase=done phone=%s engine=%s",
+            phone,
+            ai_response.get("engine"),
+        )
+    finally:
+        db.close()
+
+
 # -------------------------------------------------------------------
 # Main Webhook
 # -------------------------------------------------------------------
@@ -103,10 +208,15 @@ def _parse_service_time(raw_time: str | None) -> time | None:
 @limiter.limit("30/minute")
 async def receive_webhook(
     request: Request,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ) -> Response:
     """
     Receive WhatsApp webhook from Twilio.
+
+    Returns an immediate TwiML response (< 1 s) and schedules
+    AI processing as a background task.  The final AI reply is
+    delivered asynchronously via the Twilio REST API.
     """
 
     form = await request.form()
@@ -126,6 +236,7 @@ async def receive_webhook(
 
     # ------------------------------------------------------------
     # Auto-booking from predictive reminder reply (deterministic)
+    # Fast path — runs synchronously within the 15 s window.
     # ------------------------------------------------------------
 
     lower_msg = incoming_message.strip().lower()
@@ -157,81 +268,66 @@ async def receive_webhook(
             )
 
     # ------------------------------------------------------------
-    # AI Engine (future-proof layer)
+    # Rule-based conversation flow (fast, deterministic)
+    # Runs synchronously — completes well within 15 s.
     # ------------------------------------------------------------
 
-    ai_engine = get_ai_engine()
-    selected_engine = "llm" if ai_engine.__class__.__name__ == "LLMEngine" else "rule"
-    try:
-        raw_ai_response = ai_engine.process(
+    state = get_state(phone)
+    logger.info("Current conversation state for %s: %s", phone, state or "None")
+
+    if state is not None:
+        # User is mid-conversation — handle synchronously
+        return _handle_rule_conversation(
             db=db,
-            garage_id=garage_id,
             phone=phone,
-            message=incoming_message,
+            garage_id=garage_id,
+            incoming_message=incoming_message,
+            state=state,
         )
-    except Exception as exc:
-        logger.exception("AI engine processing failed")
-        raw_ai_response = {
-            "engine": selected_engine,
-            "type": "conversation",
-            "reply": f"Request processed. (AI error: {exc})",
-            "tool": None,
-            "arguments": None,
-            "result": {"error": str(exc)},
-        }
-
-    ai_response = raw_ai_response if isinstance(raw_ai_response, dict) else {}
-
-    if not isinstance(raw_ai_response, dict):
-        logger.warning("AI engine returned non-dict response: %r", raw_ai_response)
-        ai_response = {
-            "engine": selected_engine,
-            "type": "conversation",
-            "reply": "Request processed.",
-            "tool": None,
-            "arguments": None,
-            "result": {"error": "invalid_ai_response"},
-        }
-
-    logger.info("AI Output: %s", ai_response)
-
-    if ai_response.get("engine") == "llm":
-        reply = ai_response.get("reply") or "Request processed."
-        twiml_response = _build_twiml_reply(reply)
-        return Response(content=twiml_response, media_type="application/xml")
-
 
     # ------------------------------------------------------------
-    # Rule-based extraction (current stable system)
+    # AI Engine (async — offload to background task)
     # ------------------------------------------------------------
+
+    background_tasks.add_task(
+        _process_ai_in_background,
+        phone=phone,
+        incoming_message=incoming_message,
+        garage_id=garage_id,
+    )
+
+    logger.info(
+        "event=webhook_async phase=queued phone=%s garage_id=%s",
+        phone,
+        garage_id,
+    )
+
+    # Return an immediate acknowledgement so Twilio doesn't time out.
+    return Response(content=_IMMEDIATE_ACK, media_type="application/xml")
+
+
+# -------------------------------------------------------------------
+# Synchronous rule-based conversation handler
+# -------------------------------------------------------------------
+
+
+def _handle_rule_conversation(
+    db: Session,
+    phone: str,
+    garage_id: int,
+    incoming_message: str,
+    state: str,
+) -> Response:
+    """
+    Handle multi-turn rule-based booking conversation.
+    Runs synchronously — all paths complete in milliseconds.
+    """
     extracted = extract_booking_details(incoming_message)
     detected_service_type = extracted.get("service_type") or "general_service"
     detected_service_date = extracted.get("service_date")
     detected_service_time = extracted.get("service_time")
 
-    state = get_state(phone)
-    logger.info("Current conversation state for %s: %s", phone, state or "None")
-
-    # ------------------------------------------------------------
-    # Conversation Flow
-    # ------------------------------------------------------------
-
-    if state is None:
-        update_data(phone, "initial_message", incoming_message)
-        update_data(phone, "service_type", detected_service_type)
-
-        if detected_service_date is None:
-            set_state(phone, "waiting_for_date")
-            reply = "Thanks. Please share your preferred service date."
-        else:
-            update_data(phone, "service_date", detected_service_date)
-            set_state(phone, "waiting_for_time")
-            reply = (
-                f"Great. What time works for your {detected_service_type} "
-                f"on {detected_service_date}?"
-            )
-
-    elif state == "waiting_for_date":
+    if state == "waiting_for_date":
         update_data(phone, "service_date", incoming_message)
         set_state(phone, "waiting_for_time")
         reply = "Got it. What time would you prefer?"
