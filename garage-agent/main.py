@@ -19,6 +19,7 @@ from garage_agent.db.init_db import init_db
 from garage_agent.db.bootstrap import get_default_garage
 from garage_agent.db.session import SessionLocal
 from garage_agent.scheduler.reminder_scheduler import start_scheduler
+from garage_agent.ai.llm_engine import warmup_llm
 from garage_agent.routes import webhook, bookings, twilio_webhook
 from garage_agent.routes import jobcards
 from garage_agent.routes.reports import router as reports_router
@@ -34,8 +35,6 @@ from garage_agent.core.middleware import RequestContextMiddleware
 
 from dotenv import load_dotenv
 load_dotenv()
-import os
-print("OPENAI KEY LOADED:", bool(os.getenv("OPENAI_API_KEY")))
 
 logging.basicConfig(
     level=logging.INFO,
@@ -50,6 +49,9 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # Ensure SQL tables exist at app startup.
     init_db()
     logger.info("Database tables initialized.")
+
+    # Pre-load the LLM into Ollama's RAM before serving traffic.
+    warmup_llm()
 
     db = SessionLocal()
     try:

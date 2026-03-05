@@ -1,41 +1,51 @@
 """
-LLM Engine – Agentic Execution Layer.
+LLM Engine – Agentic Execution Layer (Ollama / qwen2.5:7b).
 
 Responsible for:
 1. Understanding user intent (LLM or rule fallback)
 2. Requesting tool definitions from ToolRegistry
 3. Executing selected tools via registry
 4. Returning structured response payload
+
+Provider: local Ollama instance (HTTP POST to /api/generate).
 """
 
 import json
 import logging
 import os
+import time as _time
 from datetime import date, datetime, time
 from typing import Any
 
+import requests
 from sqlalchemy.orm import Session
 
 from garage_agent.ai.base_engine import BaseEngine
 from garage_agent.ai.rule_engine import RuleEngine
 from garage_agent.ai.tools.registry import ToolRegistry
 
-try:
-    from openai import OpenAI
-except Exception:  # pragma: no cover - import safety for environments without dependency
-    OpenAI = None
-
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Default configuration
+# ---------------------------------------------------------------------------
+_DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434"
+_DEFAULT_OLLAMA_MODEL = "qwen2.5:7b"
+_DEFAULT_OLLAMA_TIMEOUT = 300          # seconds – generous for CPU inference
+_DEFAULT_OLLAMA_KEEP_ALIVE = "30m"     # keep model resident in RAM
 
 
 class LLMEngine(BaseEngine):
     def __init__(self):
         self.registry = ToolRegistry()
         self.rule_engine = RuleEngine()
-        self.model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+
+        self.ollama_base_url = os.getenv("OLLAMA_BASE_URL", _DEFAULT_OLLAMA_BASE_URL).rstrip("/")
+        self.model = os.getenv("OLLAMA_MODEL", _DEFAULT_OLLAMA_MODEL)
+
         self.system_prompt = (
             "You are a garage service assistant. "
-            "When the request requires a backend action, call the best matching tool. "
+            "When the request requires a backend action, select the best matching tool. "
             "When information is missing, ask a short clarifying question."
         )
         self.tool_result_prompt = (
@@ -45,19 +55,138 @@ class LLMEngine(BaseEngine):
         )
         self.tool_execution_failure_reply = "I couldn't complete that request. Please try again."
 
-        api_key = os.getenv("OPENAI_API_KEY")
-        self.client = OpenAI(api_key=api_key) if OpenAI and api_key else None
+        logger.info(
+            "event=llm_engine_init model=%s base_url=%s",
+            self.model,
+            self.ollama_base_url,
+        )
 
-        if OpenAI is None:
-            logger.error("openai package unavailable. Falling back to RuleEngine.")
-        elif not api_key:
-            logger.warning("OPENAI_API_KEY not set. Falling back to RuleEngine.")
+    # ------------------------------------------------------------------
+    # Ollama HTTP transport
+    # ------------------------------------------------------------------
+
+    def _call_ollama(self, prompt: str) -> str:
+        """
+        Send a prompt to the local Ollama instance and return the
+        generated text.  Uses ``/api/generate`` with streaming disabled
+        and temperature fixed at 0 for deterministic output.
+
+        Performance knobs (CPU-friendly):
+        * ``keep_alive`` – keeps the model loaded in RAM between calls.
+        * ``timeout``    – 300 s to tolerate slow CPU inference.
+        * Latency is measured and logged on every call.
+        """
+        url = f"{self.ollama_base_url}/api/generate"
+        payload = {
+            "model": self.model,
+            "prompt": prompt,
+            "stream": False,
+            "keep_alive": _DEFAULT_OLLAMA_KEEP_ALIVE,
+            "options": {
+                "temperature": 0,
+            },
+        }
+        logger.info("event=ollama_call phase=start url=%s model=%s", url, self.model)
+
+        start = _time.time()
+        response = requests.post(url, json=payload, timeout=_DEFAULT_OLLAMA_TIMEOUT)
+        duration = _time.time() - start
+
+        response.raise_for_status()
+        data = response.json()
+        generated_text = data.get("response", "").strip()
+        logger.info(
+            "event=ollama_call phase=success model=%s response_length=%d latency=%.2fs",
+            self.model,
+            len(generated_text),
+            duration,
+        )
+        return generated_text
+
+    # ------------------------------------------------------------------
+    # Prompt builders
+    # ------------------------------------------------------------------
+
+    def _build_tool_selection_prompt(self, user_message: str) -> str:
+        """
+        Constructs a prompt that asks the LLM to decide whether a tool
+        should be called or a conversational reply should be returned.
+
+        The model is instructed to reply with **only** a JSON object in
+        one of two shapes:
+
+        Tool call:
+            {"action": "<tool_name>", "arg1": "...", ...}
+
+        Conversation (no tool needed):
+            {"action": "conversation", "reply": "..."}
+        """
+        tool_descriptions = self._get_tool_description_block()
+
+        prompt = (
+            f"### SYSTEM\n{self.system_prompt}\n\n"
+            f"### AVAILABLE TOOLS\n{tool_descriptions}\n\n"
+            "### INSTRUCTIONS\n"
+            "Analyze the user message below and decide which action to take.\n"
+            "- If a backend tool should be called, respond with a JSON object "
+            "containing \"action\" set to the tool name and all required arguments.\n"
+            "- If no tool is needed (e.g. greeting or clarifying question), "
+            "respond with: {\"action\": \"conversation\", \"reply\": \"<your reply>\"}\n\n"
+            "Rules:\n"
+            "1. Respond ONLY with a single valid JSON object — no extra text.\n"
+            "2. Use the exact tool names listed above.\n"
+            "3. Dates must be in YYYY-MM-DD format, times in HH:MM (24-hour).\n"
+            "4. If required information is missing, use the conversation action "
+            "to ask a clarifying question.\n\n"
+            f"### USER MESSAGE\n{user_message}\n\n"
+            "### YOUR JSON RESPONSE\n"
+        )
+        return prompt
+
+    def _get_tool_description_block(self) -> str:
+        """
+        Return a compact list of available tool names.
+
+        Minimised to reduce token count for CPU-constrained inference;
+        the model only needs to know *which* tools exist — the backend
+        handles argument validation via ToolRegistry.
+        """
+        tool_names = self.registry.list_tools()
+        if not tool_names:
+            return "No tools available."
+        # Plain newline-separated list — cheapest possible representation
+        return "\n".join(f"- {name}" for name in tool_names)
+
+    def _build_followup_prompt(
+        self,
+        user_message: str,
+        tool_name: str,
+        tool_result: Any,
+    ) -> str:
+        """
+        Build a prompt that asks the LLM to compose a customer-friendly
+        WhatsApp reply from a tool execution result.
+        """
+        tool_result_payload = json.dumps(tool_result, ensure_ascii=False)
+        prompt = (
+            f"### SYSTEM\n{self.tool_result_prompt}\n\n"
+            f"### ORIGINAL USER MESSAGE\n{user_message}\n\n"
+            f"### EXECUTED TOOL\n{tool_name}\n\n"
+            f"### TOOL RESULT (JSON)\n{tool_result_payload}\n\n"
+            "### INSTRUCTIONS\n"
+            "Generate a concise, customer-friendly WhatsApp reply based on "
+            "the tool result above. Do NOT output JSON — just the plain-text reply.\n"
+        )
+        return prompt
+
+    # ------------------------------------------------------------------
+    # Main entry point
+    # ------------------------------------------------------------------
 
     def process(self, db: Session, garage_id: int, phone: str, message: str) -> dict:
         """
-        OpenAI function-calling execution path.
+        Ollama-based execution path.
         """
-
         safe_message = (message or "").strip()
         logger.info(
             "event=process_start engine=llm phone=%s garage_id=%s",
@@ -68,27 +197,11 @@ class LLMEngine(BaseEngine):
         if not safe_message:
             return self._conversation_response("Please provide more details so I can assist you.")
 
-        if self.client is None:
-            return self._fallback_to_rule(
-                db=db,
-                garage_id=garage_id,
-                phone=phone,
-                message=safe_message,
-                reason="openai_client_unavailable",
-            )
-
+        # ----- Step 1: Ask model to decide intent / tool -----
+        tool_selection_prompt = self._build_tool_selection_prompt(safe_message)
         try:
             logger.info("event=model_call phase=start model=%s", self.model)
-            completion = self.client.chat.completions.create(
-                model=self.model,
-                temperature=0,
-                tool_choice="auto",
-                tools=self.registry.get_openai_tool_definitions(),
-                messages=[
-                    {"role": "system", "content": self.system_prompt},
-                    {"role": "user", "content": safe_message},
-                ],
-            )
+            raw_response = self._call_ollama(tool_selection_prompt)
             logger.info("event=model_call phase=success model=%s", self.model)
         except Exception as exc:
             logger.exception("event=model_call phase=error model=%s", self.model)
@@ -97,201 +210,261 @@ class LLMEngine(BaseEngine):
                 garage_id=garage_id,
                 phone=phone,
                 message=safe_message,
-                reason="openai_api_error",
+                reason="ollama_api_error",
                 error=exc,
             )
 
+        # ----- Step 2: Parse the JSON response -----
         try:
-            message_obj = completion.choices[0].message
-        except Exception as exc:
-            logger.warning("event=model_call phase=malformed_response model=%s", self.model)
+            parsed = self._extract_json(raw_response)
+        except ValueError as exc:
+            logger.warning(
+                "event=model_call phase=json_parse_error raw_response=%s",
+                raw_response[:300],
+            )
             return self._fallback_to_rule(
                 db=db,
                 garage_id=garage_id,
                 phone=phone,
                 message=safe_message,
-                reason="openai_malformed_response",
+                reason="ollama_json_parse_error",
                 error=exc,
             )
 
-        tool_calls = getattr(message_obj, "tool_calls", None) or []
-        if tool_calls:
-            tool_call = tool_calls[0]
-            tool_name = getattr(tool_call.function, "name", None)
-            raw_arguments = getattr(tool_call.function, "arguments", "{}")
+        action = parsed.get("action", "conversation")
 
-            if not tool_name:
-                logger.warning("event=tool_decision decision=missing_tool_name")
-                return self._fallback_to_rule(
-                    db=db,
-                    garage_id=garage_id,
-                    phone=phone,
-                    message=safe_message,
-                    reason="missing_tool_name",
-                )
+        # ----- Step 3a: Conversational reply (no tool) -----
+        if action == "conversation":
+            reply = parsed.get("reply", "Request processed.")
+            logger.info("event=tool_decision decision=conversation")
+            return self._conversation_response(reply)
 
-            if not self.registry.has_tool(tool_name):
-                logger.warning("event=tool_decision decision=unknown_tool tool=%s", tool_name)
-                return self._fallback_to_rule(
-                    db=db,
-                    garage_id=garage_id,
-                    phone=phone,
-                    message=safe_message,
-                    reason="unknown_tool",
-                )
+        # ----- Step 3b: Tool call -----
+        tool_name = action
 
-            try:
-                parsed_arguments = self._parse_tool_arguments(raw_arguments)
-            except ValueError as exc:
-                logger.warning("event=tool_decision decision=argument_parse_error tool=%s", tool_name)
-                return self._fallback_to_rule(
-                    db=db,
-                    garage_id=garage_id,
-                    phone=phone,
-                    message=safe_message,
-                    reason="tool_argument_parse_error",
-                    error=exc,
-                )
+        if not self.registry.has_tool(tool_name):
+            logger.warning("event=tool_decision decision=unknown_tool tool=%s", tool_name)
+            return self._fallback_to_rule(
+                db=db,
+                garage_id=garage_id,
+                phone=phone,
+                message=safe_message,
+                reason="unknown_tool",
+            )
 
-            arguments = self.registry.sanitize_arguments(tool_name, parsed_arguments)
-            logger.info(
-                "event=tool_decision decision=tool_selected tool=%s argument_keys=%s",
+        # Extract arguments (everything except "action")
+        raw_arguments = {k: v for k, v in parsed.items() if k != "action"}
+
+        try:
+            parsed_arguments = self._parse_tool_arguments(raw_arguments)
+        except ValueError as exc:
+            logger.warning("event=tool_decision decision=argument_parse_error tool=%s", tool_name)
+            return self._fallback_to_rule(
+                db=db,
+                garage_id=garage_id,
+                phone=phone,
+                message=safe_message,
+                reason="tool_argument_parse_error",
+                error=exc,
+            )
+
+        arguments = self.registry.sanitize_arguments(tool_name, parsed_arguments)
+        logger.info(
+            "event=tool_decision decision=tool_selected tool=%s argument_keys=%s",
+            tool_name,
+            sorted(arguments.keys()),
+        )
+
+        # ----- Step 4: Execute the tool -----
+        logger.info("event=tool_execution phase=start tool=%s", tool_name)
+        try:
+            tool_execution = self.registry.execute(
+                tool_name=tool_name,
+                db=db,
+                garage_id=garage_id,
+                **arguments,
+            )
+        except Exception:
+            logger.exception("event=tool_execution phase=error tool=%s", tool_name)
+            return self._tool_execution_failure_response()
+
+        if not isinstance(tool_execution, dict):
+            logger.warning(
+                "event=tool_execution phase=invalid_response tool=%s response_type=%s",
                 tool_name,
-                sorted(arguments.keys()),
+                type(tool_execution).__name__,
             )
+            return self._tool_execution_failure_response()
 
-            logger.info("event=tool_execution phase=start tool=%s", tool_name)
-            try:
-                tool_execution = self.registry.execute(
-                    tool_name=tool_name,
-                    db=db,
-                    garage_id=garage_id,
-                    **arguments,
-                )
-            except Exception:
-                logger.exception("event=tool_execution phase=error tool=%s", tool_name)
-                return self._tool_execution_failure_response()
-
-            if not isinstance(tool_execution, dict):
-                logger.warning(
-                    "event=tool_execution phase=invalid_response tool=%s response_type=%s",
-                    tool_name,
-                    type(tool_execution).__name__,
-                )
-                return self._tool_execution_failure_response()
-
-            execution_success = bool(tool_execution.get("success"))
-            logger.info(
-                "event=tool_execution phase=finish tool=%s success=%s",
+        execution_success = bool(tool_execution.get("success"))
+        logger.info(
+            "event=tool_execution phase=finish tool=%s success=%s",
+            tool_name,
+            execution_success,
+        )
+        if not execution_success:
+            logger.warning(
+                "event=tool_execution phase=failed tool=%s error=%s",
                 tool_name,
-                execution_success,
+                tool_execution.get("error"),
             )
-            if not execution_success:
+            return self._tool_execution_failure_response()
+
+        serialized_result = self._make_json_safe(tool_execution.get("data"))
+
+        # ----- Vehicle health special handling -----
+        if tool_name == "analyze_vehicle_health":
+            result = serialized_result if isinstance(serialized_result, dict) else {}
+            health_score = result.get(
+                "health_score",
+                result.get("vehicle_health_score", 100),
+            )
+            predicted_date = result.get("predicted_next_service_date")
+            recurring_issues = result.get("recurring_issues", [])
+            critical_flag = False
+
+            if health_score < 40 or len(recurring_issues) >= 3:
+                critical_flag = True
+
+            if critical_flag:
                 logger.warning(
-                    "event=tool_execution phase=failed tool=%s error=%s",
-                    tool_name,
-                    tool_execution.get("error"),
-                )
-                return self._tool_execution_failure_response()
-
-            serialized_result = self._make_json_safe(tool_execution.get("data"))
-
-            if tool_name == "analyze_vehicle_health":
-                result = serialized_result if isinstance(serialized_result, dict) else {}
-                health_score = result.get(
-                    "health_score",
-                    result.get("vehicle_health_score", 100),
-                )
-                predicted_date = result.get("predicted_next_service_date")
-                recurring_issues = result.get("recurring_issues", [])
-                critical_flag = False
-
-                if health_score < 40 or len(recurring_issues) >= 3:
-                    critical_flag = True
-
-                if critical_flag:
-                    logger.warning(
-                        "CRITICAL VEHICLE CONDITION DETECTED | phone=%s | score=%s | recurring=%s",
-                        phone,
-                        health_score,
-                        len(recurring_issues),
-                    )
-
-                    from garage_agent.services.escalation_service import create_escalation
-
-                    create_escalation(
-                        db=db,
-                        garage_id=garage_id,
-                        vehicle_id=arguments["vehicle_id"],
-                        reason="Critical health score or repeated issue",
-                        health_score=health_score,
-                    )
-
-                    # Placeholder for future escalation actions
-                    # Example: create internal notification event
-                    escalation_message = "⚠️ Critical vehicle condition detected. Staff review required."
-                else:
-                    escalation_message = None
-
-                if health_score >= 80:
-                    urgency = "Low"
-                    recommendation = "Vehicle condition is good."
-                elif health_score >= 50:
-                    urgency = "Medium"
-                    recommendation = "Service recommended soon."
-                else:
-                    urgency = "High"
-                    recommendation = "Immediate inspection advised."
-
-                message = (
-                    f"Vehicle Health Score: {health_score}/100\n"
-                    f"Urgency Level: {urgency}\n"
-                    f"Predicted Next Service: {predicted_date}\n"
-                    f"Recurring Issues: {len(recurring_issues)} detected\n\n"
-                    f"Recommendation: {recommendation}"
+                    "CRITICAL VEHICLE CONDITION DETECTED | phone=%s | score=%s | recurring=%s",
+                    phone,
+                    health_score,
+                    len(recurring_issues),
                 )
 
-                return {
-                    "engine": "llm",
-                    "type": "intelligence_report",
-                    "reply": message,
-                    "tool": tool_name,
-                    "result": result,
-                    "critical": critical_flag,
-                    "escalation_note": escalation_message,
-                }
+                from garage_agent.services.escalation_service import create_escalation
 
-            try:
-                logger.info("event=model_call phase=followup_start model=%s tool=%s", self.model, tool_name)
-                final_reply = self._generate_tool_followup_reply(
-                    user_message=safe_message,
-                    tool_name=tool_name,
-                    tool_result=serialized_result,
-                )
-                logger.info("event=model_call phase=followup_success model=%s tool=%s", self.model, tool_name)
-            except Exception as exc:
-                logger.exception("event=model_call phase=followup_error model=%s tool=%s", self.model, tool_name)
-                return self._fallback_to_rule(
+                create_escalation(
                     db=db,
                     garage_id=garage_id,
-                    phone=phone,
-                    message=safe_message,
-                    reason="openai_followup_error",
-                    error=exc,
+                    vehicle_id=arguments["vehicle_id"],
+                    reason="Critical health score or repeated issue",
+                    health_score=health_score,
                 )
 
-            return self._response_contract(
-                engine="llm",
-                response_type="tool_call",
-                reply=final_reply,
-                tool=tool_name,
-                arguments=arguments,
-                result=serialized_result,
+                escalation_message = "⚠️ Critical vehicle condition detected. Staff review required."
+            else:
+                escalation_message = None
+
+            if health_score >= 80:
+                urgency = "Low"
+                recommendation = "Vehicle condition is good."
+            elif health_score >= 50:
+                urgency = "Medium"
+                recommendation = "Service recommended soon."
+            else:
+                urgency = "High"
+                recommendation = "Immediate inspection advised."
+
+            message = (
+                f"Vehicle Health Score: {health_score}/100\n"
+                f"Urgency Level: {urgency}\n"
+                f"Predicted Next Service: {predicted_date}\n"
+                f"Recurring Issues: {len(recurring_issues)} detected\n\n"
+                f"Recommendation: {recommendation}"
             )
 
-        logger.info("event=tool_decision decision=conversation")
-        reply = self._extract_message_text(message_obj) or "Request processed."
-        return self._conversation_response(reply)
+            return {
+                "engine": "llm",
+                "type": "intelligence_report",
+                "reply": message,
+                "tool": tool_name,
+                "result": result,
+                "critical": critical_flag,
+                "escalation_note": escalation_message,
+            }
+
+        # ----- Step 5: Generate follow-up reply via Ollama -----
+        try:
+            logger.info("event=model_call phase=followup_start model=%s tool=%s", self.model, tool_name)
+            final_reply = self._generate_tool_followup_reply(
+                user_message=safe_message,
+                tool_name=tool_name,
+                tool_result=serialized_result,
+            )
+            logger.info("event=model_call phase=followup_success model=%s tool=%s", self.model, tool_name)
+        except Exception as exc:
+            logger.exception("event=model_call phase=followup_error model=%s tool=%s", self.model, tool_name)
+            return self._fallback_to_rule(
+                db=db,
+                garage_id=garage_id,
+                phone=phone,
+                message=safe_message,
+                reason="ollama_followup_error",
+                error=exc,
+            )
+
+        return self._response_contract(
+            engine="llm",
+            response_type="tool_call",
+            reply=final_reply,
+            tool=tool_name,
+            arguments=arguments,
+            result=serialized_result,
+        )
+
+    # ------------------------------------------------------------------
+    # Follow-up reply generation
+    # ------------------------------------------------------------------
+
+    def _generate_tool_followup_reply(
+        self,
+        user_message: str,
+        tool_name: str,
+        tool_result: Any,
+    ) -> str:
+        prompt = self._build_followup_prompt(user_message, tool_name, tool_result)
+        reply = self._call_ollama(prompt)
+        return reply or "Request processed."
+
+    # ------------------------------------------------------------------
+    # JSON extraction helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _extract_json(text: str) -> dict:
+        """
+        Attempt to parse JSON from LLM output.  Handles the common case
+        where the model wraps JSON in markdown fences (```json ... ```).
+        """
+        cleaned = text.strip()
+
+        # Strip markdown code fences if present
+        if cleaned.startswith("```"):
+            # Remove opening fence (```json or ```)
+            first_newline = cleaned.index("\n") if "\n" in cleaned else len(cleaned)
+            cleaned = cleaned[first_newline + 1:]
+            if cleaned.endswith("```"):
+                cleaned = cleaned[:-3]
+            cleaned = cleaned.strip()
+
+        # Try to find JSON object boundaries
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            json_str = cleaned[start:end + 1]
+            try:
+                parsed = json.loads(json_str)
+                if isinstance(parsed, dict):
+                    return parsed
+            except json.JSONDecodeError:
+                pass
+
+        # Last resort: try the whole string
+        try:
+            parsed = json.loads(cleaned)
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            pass
+
+        raise ValueError(f"Could not extract valid JSON object from LLM response: {text[:200]}")
+
+    # ------------------------------------------------------------------
+    # Fallback & response helpers (unchanged from original)
+    # ------------------------------------------------------------------
 
     def _fallback_to_rule(
         self,
@@ -434,52 +607,6 @@ class LLMEngine(BaseEngine):
             **args,
         )
 
-    def _generate_tool_followup_reply(
-        self,
-        user_message: str,
-        tool_name: str,
-        tool_result: Any,
-    ) -> str:
-        tool_result_payload = json.dumps(tool_result, ensure_ascii=False)
-        completion = self.client.chat.completions.create(
-            model=self.model,
-            temperature=0,
-            messages=[
-                {"role": "system", "content": self.tool_result_prompt},
-                {"role": "user", "content": user_message},
-                {
-                    "role": "user",
-                    "content": (
-                        f"Executed tool: {tool_name}\n"
-                        f"Tool result JSON: {tool_result_payload}\n\n"
-                        "Generate the final customer-facing response."
-                    ),
-                },
-            ],
-        )
-        followup_message = completion.choices[0].message
-        return self._extract_message_text(followup_message) or "Request processed."
-
-    def _extract_message_text(self, message_obj: Any) -> str:
-        content = getattr(message_obj, "content", None)
-        if isinstance(content, str):
-            return content.strip()
-
-        if isinstance(content, list):
-            parts: list[str] = []
-            for item in content:
-                if isinstance(item, dict):
-                    text_value = item.get("text")
-                    if isinstance(text_value, str) and text_value.strip():
-                        parts.append(text_value.strip())
-                else:
-                    text_value = getattr(item, "text", None)
-                    if isinstance(text_value, str) and text_value.strip():
-                        parts.append(text_value.strip())
-            return "\n".join(parts).strip()
-
-        return ""
-
     def _make_json_safe(self, value: Any) -> Any:
         if value is None or isinstance(value, (str, int, float, bool)):
             return value
@@ -503,3 +630,40 @@ class LLMEngine(BaseEngine):
             return data
 
         return str(value)
+
+
+# ------------------------------------------------------------------
+# Module-level warmup helper (call from FastAPI lifespan)
+# ------------------------------------------------------------------
+
+def warmup_llm() -> None:
+    """
+    Send a tiny prompt to Ollama so that the model is loaded into
+    memory *before* the first real user request arrives.
+
+    Safe to call at application startup — failures are logged and
+    swallowed so they never prevent the server from starting.
+    """
+    base_url = os.getenv("OLLAMA_BASE_URL", _DEFAULT_OLLAMA_BASE_URL).rstrip("/")
+    model = os.getenv("OLLAMA_MODEL", _DEFAULT_OLLAMA_MODEL)
+    url = f"{base_url}/api/generate"
+    payload = {
+        "model": model,
+        "prompt": "hello",
+        "stream": False,
+        "keep_alive": _DEFAULT_OLLAMA_KEEP_ALIVE,
+        "options": {"temperature": 0},
+    }
+    logger.info("event=llm_warmup phase=start model=%s", model)
+    try:
+        start = _time.time()
+        resp = requests.post(url, json=payload, timeout=_DEFAULT_OLLAMA_TIMEOUT)
+        duration = _time.time() - start
+        resp.raise_for_status()
+        logger.info(
+            "event=llm_warmup phase=success model=%s latency=%.2fs",
+            model,
+            duration,
+        )
+    except Exception:
+        logger.exception("event=llm_warmup phase=error model=%s", model)
