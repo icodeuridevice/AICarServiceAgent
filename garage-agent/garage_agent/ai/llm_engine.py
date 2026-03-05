@@ -1,5 +1,5 @@
 """
-LLM Engine – Agentic Execution Layer (Ollama / qwen2.5:7b).
+LLM Engine – Agentic Execution Layer (Ollama / qwen3.5:2b).
 
 Responsible for:
 1. Understanding user intent (LLM or rule fallback)
@@ -13,6 +13,7 @@ Provider: local Ollama instance (HTTP POST to /api/generate).
 import json
 import logging
 import os
+import subprocess
 import time as _time
 from datetime import date, datetime, time
 from typing import Any
@@ -30,9 +31,83 @@ logger = logging.getLogger(__name__)
 # Default configuration
 # ---------------------------------------------------------------------------
 _DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434"
-_DEFAULT_OLLAMA_MODEL = "qwen2.5:7b"
+_DEFAULT_OLLAMA_GENERATE_PATH = "/api/generate"
+MODEL_NAME = "qwen3.5:2b"
+_DEFAULT_OLLAMA_MODEL = MODEL_NAME
 _DEFAULT_OLLAMA_TIMEOUT = 300          # seconds – generous for CPU inference
-_DEFAULT_OLLAMA_KEEP_ALIVE = "30m"     # keep model resident in RAM
+_DEFAULT_OLLAMA_NUM_PREDICT = 120      # short deterministic completions for CPU
+_MODEL_CHECK_TTL_SECONDS = 60
+
+_model_check_cache: dict[str, float] = {}
+
+
+def _normalize_ollama_base_url(raw_base_url: str) -> str:
+    normalized = (raw_base_url or _DEFAULT_OLLAMA_BASE_URL).strip().rstrip("/")
+    if normalized.endswith(_DEFAULT_OLLAMA_GENERATE_PATH):
+        normalized = normalized[: -len(_DEFAULT_OLLAMA_GENERATE_PATH)]
+    return normalized or _DEFAULT_OLLAMA_BASE_URL
+
+
+def _build_generate_url(base_url: str) -> str:
+    return f"{base_url}{_DEFAULT_OLLAMA_GENERATE_PATH}"
+
+
+def _ensure_ollama_model_available(model: str) -> None:
+    now = _time.time()
+    last_checked = _model_check_cache.get(model)
+    if last_checked and (now - last_checked) < _MODEL_CHECK_TTL_SECONDS:
+        return
+
+    try:
+        result = subprocess.run(
+            ["ollama", "list"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        logger.error(
+            "event=ollama_model_check phase=command_missing model=%s error=%s",
+            model,
+            exc,
+        )
+        raise RuntimeError("Ollama CLI not found. Install Ollama and ensure `ollama` is on PATH.") from exc
+    except subprocess.TimeoutExpired as exc:
+        logger.error("event=ollama_model_check phase=timeout model=%s", model)
+        raise RuntimeError("Timed out while running `ollama list`.") from exc
+
+    if result.returncode != 0:
+        stderr = (result.stderr or "").strip()
+        logger.error(
+            "event=ollama_model_check phase=command_error model=%s return_code=%s stderr=%s",
+            model,
+            result.returncode,
+            stderr[:300],
+        )
+        raise RuntimeError(f"`ollama list` failed with return code {result.returncode}.")
+
+    available_models: set[str] = set()
+    for line in (result.stdout or "").splitlines():
+        parts = line.split()
+        if not parts:
+            continue
+        first_token = parts[0].strip()
+        if first_token.lower() in {"name", "model"}:
+            continue
+        available_models.add(first_token)
+
+    if model not in available_models:
+        logger.error(
+            "event=ollama_model_check phase=missing model=%s available_models=%s",
+            model,
+            sorted(available_models),
+        )
+        raise RuntimeError(
+            f"Ollama model '{model}' is not available. Run `ollama pull {model}`."
+        )
+
+    _model_check_cache[model] = now
 
 
 class LLMEngine(BaseEngine):
@@ -40,17 +115,19 @@ class LLMEngine(BaseEngine):
         self.registry = ToolRegistry()
         self.rule_engine = RuleEngine()
 
-        self.ollama_base_url = os.getenv("OLLAMA_BASE_URL", _DEFAULT_OLLAMA_BASE_URL).rstrip("/")
-        self.model = os.getenv("OLLAMA_MODEL", _DEFAULT_OLLAMA_MODEL)
+        self.ollama_base_url = _normalize_ollama_base_url(
+            os.getenv("OLLAMA_BASE_URL", _DEFAULT_OLLAMA_BASE_URL)
+        )
+        self.model = os.getenv("OLLAMA_MODEL", MODEL_NAME)
 
         self.system_prompt = (
             "You are a garage service assistant. "
-            "When the request requires a backend action, select the best matching tool. "
-            "When information is missing, ask a short clarifying question."
+            "Pick one backend tool when needed. "
+            "If required details are missing, ask one short question."
         )
         self.tool_result_prompt = (
-            "A backend garage tool has already been executed successfully. "
-            "Write a concise, customer-friendly WhatsApp reply using the tool result. "
+            "A garage backend tool already ran successfully. "
+            "Write a short customer-friendly WhatsApp reply from the tool result. "
             "Do not mention internal implementation details."
         )
         self.tool_execution_failure_reply = "I couldn't complete that request. Please try again."
@@ -68,23 +145,22 @@ class LLMEngine(BaseEngine):
     def _call_ollama(self, prompt: str) -> str:
         """
         Send a prompt to the local Ollama instance and return the
-        generated text.  Uses ``/api/generate`` with streaming disabled
-        and temperature fixed at 0 for deterministic output.
+        generated text. Uses ``/api/generate`` with streaming disabled
+        and deterministic decoding tuned for CPU inference.
 
         Performance knobs (CPU-friendly):
-        * ``keep_alive`` – keeps the model loaded in RAM between calls.
+        * ``num_predict`` – bounds token generation cost.
         * ``timeout``    – 300 s to tolerate slow CPU inference.
         * Latency is measured and logged on every call.
         """
-        url = f"{self.ollama_base_url}/api/generate"
+        _ensure_ollama_model_available(self.model)
+        url = _build_generate_url(self.ollama_base_url)
         payload = {
             "model": self.model,
             "prompt": prompt,
             "stream": False,
-            "keep_alive": _DEFAULT_OLLAMA_KEEP_ALIVE,
-            "options": {
-                "temperature": 0,
-            },
+            "temperature": 0,
+            "num_predict": _DEFAULT_OLLAMA_NUM_PREDICT,
         }
         logger.info("event=ollama_call phase=start url=%s model=%s", url, self.model)
 
@@ -127,17 +203,15 @@ class LLMEngine(BaseEngine):
             f"### SYSTEM\n{self.system_prompt}\n\n"
             f"### AVAILABLE TOOLS\n{tool_descriptions}\n\n"
             "### INSTRUCTIONS\n"
-            "Analyze the user message below and decide which action to take.\n"
-            "- If a backend tool should be called, respond with a JSON object "
-            "containing \"action\" set to the tool name and all required arguments.\n"
-            "- If no tool is needed (e.g. greeting or clarifying question), "
-            "respond with: {\"action\": \"conversation\", \"reply\": \"<your reply>\"}\n\n"
+            "Choose one action for the user message.\n"
+            "- Tool action: return JSON with \"action\"=<tool_name> and required args.\n"
+            "- Conversation action: return JSON {\"action\":\"conversation\",\"reply\":\"<text>\"}\n\n"
             "Rules:\n"
-            "1. Respond ONLY with a single valid JSON object — no extra text.\n"
+            "1. Respond with one valid JSON object only (no markdown, no explanation).\n"
             "2. Use the exact tool names listed above.\n"
-            "3. Dates must be in YYYY-MM-DD format, times in HH:MM (24-hour).\n"
-            "4. If required information is missing, use the conversation action "
-            "to ask a clarifying question.\n\n"
+            "3. Keep keys minimal; include only required arguments.\n"
+            "4. Dates must be YYYY-MM-DD, times HH:MM (24-hour).\n"
+            "5. If required info is missing, ask a short clarifying question.\n\n"
             f"### USER MESSAGE\n{user_message}\n\n"
             "### YOUR JSON RESPONSE\n"
         )
@@ -174,8 +248,8 @@ class LLMEngine(BaseEngine):
             f"### EXECUTED TOOL\n{tool_name}\n\n"
             f"### TOOL RESULT (JSON)\n{tool_result_payload}\n\n"
             "### INSTRUCTIONS\n"
-            "Generate a concise, customer-friendly WhatsApp reply based on "
-            "the tool result above. Do NOT output JSON — just the plain-text reply.\n"
+            "Reply in plain text only. Keep it concise (max 2 short sentences). "
+            "Do not output JSON.\n"
         )
         return prompt
 
@@ -644,18 +718,21 @@ def warmup_llm() -> None:
     Safe to call at application startup — failures are logged and
     swallowed so they never prevent the server from starting.
     """
-    base_url = os.getenv("OLLAMA_BASE_URL", _DEFAULT_OLLAMA_BASE_URL).rstrip("/")
-    model = os.getenv("OLLAMA_MODEL", _DEFAULT_OLLAMA_MODEL)
-    url = f"{base_url}/api/generate"
+    base_url = _normalize_ollama_base_url(
+        os.getenv("OLLAMA_BASE_URL", _DEFAULT_OLLAMA_BASE_URL)
+    )
+    model = os.getenv("OLLAMA_MODEL", MODEL_NAME)
+    url = _build_generate_url(base_url)
     payload = {
         "model": model,
         "prompt": "hello",
         "stream": False,
-        "keep_alive": _DEFAULT_OLLAMA_KEEP_ALIVE,
-        "options": {"temperature": 0},
+        "temperature": 0,
+        "num_predict": 16,
     }
     logger.info("event=llm_warmup phase=start model=%s", model)
     try:
+        _ensure_ollama_model_available(model)
         start = _time.time()
         resp = requests.post(url, json=payload, timeout=_DEFAULT_OLLAMA_TIMEOUT)
         duration = _time.time() - start
