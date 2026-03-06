@@ -128,6 +128,20 @@ def _send_reply(phone: str, text: str) -> None:
         )
 
 
+def _route_simple_message(message: str) -> dict | None:
+    simple_messages = ["hi", "hello", "hey"]
+    normalized = (message or "").lower().strip()
+
+    if normalized not in simple_messages:
+        return None
+
+    return {
+        "engine": "rule",
+        "type": "conversation",
+        "reply": "Hello! How can I assist you with your car service today?",
+    }
+
+
 # -------------------------------------------------------------------
 # Background AI processing (runs after immediate TwiML response)
 # -------------------------------------------------------------------
@@ -148,6 +162,16 @@ def _process_ai_in_background(phone: str, incoming_message: str, garage_id: int)
         phone,
         garage_id,
     )
+
+    simple_route = _route_simple_message(incoming_message)
+    if simple_route is not None:
+        logger.info(
+            "event=simple_router phase=matched source=background phone=%s garage_id=%s",
+            phone,
+            garage_id,
+        )
+        _send_reply(phone, simple_route["reply"])
+        return
 
     db: Session = SessionLocal()
     try:
@@ -283,6 +307,18 @@ async def receive_webhook(
             garage_id=garage_id,
             incoming_message=incoming_message,
             state=state,
+        )
+
+    simple_route = _route_simple_message(incoming_message)
+    if simple_route is not None:
+        logger.info(
+            "event=simple_router phase=matched source=webhook phone=%s garage_id=%s",
+            phone,
+            garage_id,
+        )
+        return Response(
+            content=_build_twiml_reply(simple_route["reply"]),
+            media_type="application/xml",
         )
 
     # ------------------------------------------------------------

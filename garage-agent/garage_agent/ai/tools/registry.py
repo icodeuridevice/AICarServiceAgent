@@ -122,15 +122,39 @@ class ToolRegistry:
                 "vehicle_id": int,
             },
         }
-        self._openai_tool_definitions = self._build_openai_tool_definitions()
+        self._openai_tool_definitions: list[dict] | None = None
 
     def list_tools(self):
         return list(self._tools.keys())
+
+    def get_tools(self, tool_names: list[str] | None = None) -> list[str]:
+        if not tool_names:
+            return []
+
+        alias_map = {
+            "daily_summary": "get_daily_summary",
+        }
+        selected: list[str] = []
+        for raw_name in tool_names:
+            if not isinstance(raw_name, str):
+                continue
+
+            normalized_name = raw_name.strip()
+            if not normalized_name:
+                continue
+
+            canonical_name = alias_map.get(normalized_name, normalized_name)
+            if canonical_name in self._tools and canonical_name not in selected:
+                selected.append(canonical_name)
+
+        return selected
 
     def has_tool(self, tool_name: str) -> bool:
         return tool_name in self._tools
 
     def get_openai_tool_definitions(self) -> list[dict]:
+        if self._openai_tool_definitions is None:
+            self._openai_tool_definitions = self._build_openai_tool_definitions()
         return copy.deepcopy(self._openai_tool_definitions)
 
     def get_openai_tools(self) -> list[dict]:
