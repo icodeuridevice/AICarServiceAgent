@@ -7,7 +7,7 @@ Responsible for:
 3. Executing selected tools via registry
 4. Returning structured response payload
 
-Provider: local Ollama instance (HTTP POST to /api/generate).
+Provider: local Ollama instance (HTTP POST to /api/chat).
 """
 
 import json
@@ -29,6 +29,43 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Default configuration
 # ---------------------------------------------------------------------------
+SYSTEM_PROMPT = """You are an AI assistant for a car service garage.
+
+Your job is to help customers with vehicle service requests such as:
+- booking service appointments
+- answering service questions
+- checking booking status
+- assisting with vehicle issues
+
+IMPORTANT RULES:
+
+1. Never mention internal tools.
+2. Never ask the user which tool to use.
+3. Tools such as booking systems or job cards are internal mechanisms.
+4. Always speak naturally like a human customer service assistant.
+
+When a user reports a vehicle problem:
+- express empathy
+- offer to schedule a service appointment
+
+When a booking is requested:
+collect missing information step by step.
+
+Required booking information:
+- vehicle
+- service type
+- preferred date
+- preferred time
+
+If any information is missing, ask the user politely for that information.
+
+Only confirm a booking once all required information is collected.
+
+Never expose system architecture, APIs, or internal tool names.
+
+Keep responses short, friendly, and helpful.
+"""
+
 _DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434"
 _DEFAULT_OLLAMA_MODEL = "qwen3.5:2b"
 _DEFAULT_OLLAMA_NUM_PREDICT = 120
@@ -44,11 +81,7 @@ class LLMEngine(BaseEngine):
         self.ollama_base_url = os.getenv("OLLAMA_BASE_URL", _DEFAULT_OLLAMA_BASE_URL).rstrip("/")
         self.model = os.getenv("OLLAMA_MODEL", _DEFAULT_OLLAMA_MODEL)
 
-        self.system_prompt = (
-            "You are a garage service assistant. "
-            "When the request requires a backend action, select the best matching tool. "
-            "When information is missing, ask a short clarifying question."
-        )
+        self.system_prompt = SYSTEM_PROMPT
         self.tool_result_prompt = (
             "A backend garage tool has already been executed successfully. "
             "Write a concise, customer-friendly WhatsApp reply using the tool result. "
@@ -66,24 +99,37 @@ class LLMEngine(BaseEngine):
     # Ollama HTTP transport
     # ------------------------------------------------------------------
 
-    def _call_ollama(self, prompt: str) -> str:
+    def _build_messages(
+        self,
+        user_message: str,
+        history: list[dict[str, str]] | None = None,
+    ) -> list[dict[str, str]]:
+        messages = [{"role": "system", "content": self.system_prompt}]
+        if history:
+            messages.extend(history)
+        messages.append({"role": "user", "content": user_message})
+        return messages
+
+    def _call_ollama(self, messages: list[dict[str, str]]) -> str:
         """
-        Send a prompt to the local Ollama instance and return the
-        generated text.  Uses ``/api/generate`` with streaming disabled
-        and temperature fixed at 0 for deterministic output.
+        Send chat messages to the local Ollama instance and return the
+        generated assistant text. Uses ``/api/chat`` with streaming
+        disabled and temperature fixed at 0 for deterministic output.
 
         Performance knobs (CPU-friendly):
         * ``keep_alive`` – keeps the model loaded in RAM between calls.
         * ``timeout``    – 300 s to tolerate slow CPU inference.
         * Latency is measured and logged on every call.
         """
-        url = f"{self.ollama_base_url}/api/generate"
+        url = f"{self.ollama_base_url}/api/chat"
         payload = {
             "model": self.model,
-            "prompt": prompt,
+            "messages": messages,
             "stream": False,
-            "temperature": 0,
-            "num_predict": _DEFAULT_OLLAMA_NUM_PREDICT,
+            "options": {
+                "temperature": 0,
+                "num_predict": _DEFAULT_OLLAMA_NUM_PREDICT,
+            },
             "think": False,
             "keep_alive": _DEFAULT_OLLAMA_KEEP_ALIVE
         }
@@ -95,11 +141,11 @@ class LLMEngine(BaseEngine):
 
         response.raise_for_status()
         data = response.json()
-        generated_text = data.get("response", "").strip()
+        generated_text = data.get("message", {}).get("content", "").strip()
         logger.info(
-            "event=ollama_call phase=success model=%s response_length=%d latency=%.2fs",
-            len(prompt),
+            "event=ollama_call phase=success model=%s message_count=%d response_length=%d latency=%.2fs",
             self.model,
+            len(messages),
             len(generated_text),
             duration,
         )
@@ -126,7 +172,6 @@ class LLMEngine(BaseEngine):
         tool_descriptions = self._get_tool_description_block()
 
         prompt = (
-            f"### SYSTEM\n{self.system_prompt}\n\n"
             f"### AVAILABLE TOOLS\n{tool_descriptions}\n\n"
             "### INSTRUCTIONS\n"
             "Analyze the user message below and decide which action to take.\n"
@@ -171,7 +216,7 @@ class LLMEngine(BaseEngine):
         """
         tool_result_payload = json.dumps(tool_result, ensure_ascii=False)
         prompt = (
-            f"### SYSTEM\n{self.tool_result_prompt}\n\n"
+            f"### ADDITIONAL INSTRUCTIONS\n{self.tool_result_prompt}\n\n"
             f"### ORIGINAL USER MESSAGE\n{user_message}\n\n"
             f"### EXECUTED TOOL\n{tool_name}\n\n"
             f"### TOOL RESULT (JSON)\n{tool_result_payload}\n\n"
@@ -203,7 +248,7 @@ class LLMEngine(BaseEngine):
         tool_selection_prompt = self._build_tool_selection_prompt(safe_message)
         try:
             logger.info("event=model_call phase=start model=%s", self.model)
-            raw_response = self._call_ollama(tool_selection_prompt)
+            raw_response = self._call_ollama(self._build_messages(tool_selection_prompt))
             logger.info("event=model_call phase=success model=%s", self.model)
         except Exception as exc:
             logger.exception("event=model_call phase=error model=%s", self.model)
@@ -418,7 +463,7 @@ class LLMEngine(BaseEngine):
         tool_result: Any,
     ) -> str:
         prompt = self._build_followup_prompt(user_message, tool_name, tool_result)
-        reply = self._call_ollama(prompt)
+        reply = self._call_ollama(self._build_messages(prompt))
         return reply or "Request processed."
 
     # ------------------------------------------------------------------
