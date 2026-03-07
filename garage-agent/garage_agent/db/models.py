@@ -12,6 +12,7 @@ from sqlalchemy import (
     ForeignKeyConstraint,
     Integer,
     String,
+    Text,
     Time,
     UniqueConstraint,
     func,
@@ -433,3 +434,20 @@ class AuditLog(Base):
         default=datetime.utcnow,
     )
 
+
+class AIConversation(Base):
+    __tablename__ = "ai_conversations"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+
+    phone: Mapped[str] = mapped_column(String(32), index=True)
+
+    garage_id: Mapped[int] = mapped_column(index=True)
+
+    messages_json: Mapped[str] = mapped_column(Text)
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )

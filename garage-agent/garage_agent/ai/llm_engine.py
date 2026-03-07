@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session
 from garage_agent.ai.base_engine import BaseEngine
 from garage_agent.ai.rule_engine import RuleEngine
 from garage_agent.ai.tools.registry import ToolRegistry
+from garage_agent.services import ai_memory_service
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +72,7 @@ _DEFAULT_OLLAMA_MODEL = "qwen3.5:2b"
 _DEFAULT_OLLAMA_NUM_PREDICT = 120
 _DEFAULT_OLLAMA_TIMEOUT = 300          # seconds – generous for CPU inference
 _DEFAULT_OLLAMA_KEEP_ALIVE = "30m"     # keep model resident in RAM
+_DEFAULT_MEMORY_MESSAGE_LIMIT = 10
 
 
 class LLMEngine(BaseEngine):
@@ -82,6 +84,7 @@ class LLMEngine(BaseEngine):
         self.model = os.getenv("OLLAMA_MODEL", _DEFAULT_OLLAMA_MODEL)
 
         self.system_prompt = SYSTEM_PROMPT
+        self.max_memory_messages = _DEFAULT_MEMORY_MESSAGE_LIMIT
         self.tool_result_prompt = (
             "A backend garage tool has already been executed successfully. "
             "Write a concise, customer-friendly WhatsApp reply using the tool result. "
@@ -103,8 +106,9 @@ class LLMEngine(BaseEngine):
         self,
         user_message: str,
         history: list[dict[str, str]] | None = None,
+        system_prompt: str | None = None,
     ) -> list[dict[str, str]]:
-        messages = [{"role": "system", "content": self.system_prompt}]
+        messages = [{"role": "system", "content": system_prompt or self.system_prompt}]
         if history:
             messages.extend(history)
         messages.append({"role": "user", "content": user_message})
@@ -155,40 +159,30 @@ class LLMEngine(BaseEngine):
     # Prompt builders
     # ------------------------------------------------------------------
 
-    def _build_tool_selection_prompt(self, user_message: str) -> str:
-        """
-        Constructs a prompt that asks the LLM to decide whether a tool
-        should be called or a conversational reply should be returned.
-
-        The model is instructed to reply with **only** a JSON object in
-        one of two shapes:
-
-        Tool call:
-            {"action": "<tool_name>", "arg1": "...", ...}
-
-        Conversation (no tool needed):
-            {"action": "conversation", "reply": "..."}
-        """
+    def _build_tool_selection_system_prompt(self) -> str:
+        """Build a strict planner prompt for the initial tool-selection call."""
         tool_descriptions = self._get_tool_description_block()
 
-        prompt = (
+        return (
+            f"{self.system_prompt}\n\n"
+            "You are now deciding whether to continue the conversation directly "
+            "or call one backend garage tool. Use the prior conversation history "
+            "and the latest user message for context.\n\n"
             f"### AVAILABLE TOOLS\n{tool_descriptions}\n\n"
-            "### INSTRUCTIONS\n"
-            "Analyze the user message below and decide which action to take.\n"
-            "- If a backend tool should be called, respond with a JSON object "
-            "containing \"action\" set to the tool name and all required arguments.\n"
-            "- If no tool is needed (e.g. greeting or clarifying question), "
-            "respond with: {\"action\": \"conversation\", \"reply\": \"<your reply>\"}\n\n"
+            "### OUTPUT FORMAT\n"
+            "Respond ONLY with a single valid JSON object.\n"
+            "Tool call format:\n"
+            "{\"action\": \"<tool_name>\", \"arg1\": \"...\"}\n"
+            "Conversation format:\n"
+            "{\"action\": \"conversation\", \"reply\": \"<your reply>\"}\n\n"
             "Rules:\n"
-            "1. Respond ONLY with a single valid JSON object — no extra text.\n"
+            "1. Respond ONLY with a single valid JSON object and no extra text.\n"
             "2. Use the exact tool names listed above.\n"
-            "3. Dates must be in YYYY-MM-DD format, times in HH:MM (24-hour).\n"
+            "3. Dates must be in YYYY-MM-DD format and times in HH:MM (24-hour).\n"
             "4. If required information is missing, use the conversation action "
             "to ask a clarifying question.\n\n"
-            f"### USER MESSAGE\n{user_message}\n\n"
-            "### YOUR JSON RESPONSE\n"
+            "Return the JSON response now."
         )
-        return prompt
 
     def _get_tool_description_block(self) -> str:
         """
@@ -245,10 +239,15 @@ class LLMEngine(BaseEngine):
             return self._conversation_response("Please provide more details so I can assist you.")
 
         # ----- Step 1: Ask model to decide intent / tool -----
-        tool_selection_prompt = self._build_tool_selection_prompt(safe_message)
+        history = self._load_conversation_history(phone=phone, garage_id=garage_id)
+        tool_selection_messages = self._build_messages(
+            user_message=safe_message,
+            history=history,
+            system_prompt=self._build_tool_selection_system_prompt(),
+        )
         try:
             logger.info("event=model_call phase=start model=%s", self.model)
-            raw_response = self._call_ollama(self._build_messages(tool_selection_prompt))
+            raw_response = self._call_ollama(tool_selection_messages)
             logger.info("event=model_call phase=success model=%s", self.model)
         except Exception as exc:
             logger.exception("event=model_call phase=error model=%s", self.model)
@@ -284,7 +283,12 @@ class LLMEngine(BaseEngine):
         if action == "conversation":
             reply = parsed.get("reply", "Request processed.")
             logger.info("event=tool_decision decision=conversation")
-            return self._conversation_response(reply)
+            return self._finalize_response(
+                response=self._conversation_response(reply),
+                phone=phone,
+                garage_id=garage_id,
+                user_message=safe_message,
+            )
 
         # ----- Step 3b: Tool call -----
         tool_name = action
@@ -333,7 +337,12 @@ class LLMEngine(BaseEngine):
             )
         except Exception:
             logger.exception("event=tool_execution phase=error tool=%s", tool_name)
-            return self._tool_execution_failure_response()
+            return self._finalize_response(
+                response=self._tool_execution_failure_response(),
+                phone=phone,
+                garage_id=garage_id,
+                user_message=safe_message,
+            )
 
         if not isinstance(tool_execution, dict):
             logger.warning(
@@ -341,7 +350,12 @@ class LLMEngine(BaseEngine):
                 tool_name,
                 type(tool_execution).__name__,
             )
-            return self._tool_execution_failure_response()
+            return self._finalize_response(
+                response=self._tool_execution_failure_response(),
+                phone=phone,
+                garage_id=garage_id,
+                user_message=safe_message,
+            )
 
         execution_success = bool(tool_execution.get("success"))
         logger.info(
@@ -355,7 +369,12 @@ class LLMEngine(BaseEngine):
                 tool_name,
                 tool_execution.get("error"),
             )
-            return self._tool_execution_failure_response()
+            return self._finalize_response(
+                response=self._tool_execution_failure_response(),
+                phone=phone,
+                garage_id=garage_id,
+                user_message=safe_message,
+            )
 
         serialized_result = self._make_json_safe(tool_execution.get("data"))
 
@@ -413,7 +432,8 @@ class LLMEngine(BaseEngine):
                 f"Recommendation: {recommendation}"
             )
 
-            return {
+            return self._finalize_response(
+                response={
                 "engine": "llm",
                 "type": "intelligence_report",
                 "reply": message,
@@ -421,7 +441,11 @@ class LLMEngine(BaseEngine):
                 "result": result,
                 "critical": critical_flag,
                 "escalation_note": escalation_message,
-            }
+                },
+                phone=phone,
+                garage_id=garage_id,
+                user_message=safe_message,
+            )
 
         # ----- Step 5: Generate follow-up reply via Ollama -----
         try:
@@ -443,13 +467,18 @@ class LLMEngine(BaseEngine):
                 error=exc,
             )
 
-        return self._response_contract(
-            engine="llm",
-            response_type="tool_call",
-            reply=final_reply,
-            tool=tool_name,
-            arguments=arguments,
-            result=serialized_result,
+        return self._finalize_response(
+            response=self._response_contract(
+                engine="llm",
+                response_type="tool_call",
+                reply=final_reply,
+                tool=tool_name,
+                arguments=arguments,
+                result=serialized_result,
+            ),
+            phone=phone,
+            garage_id=garage_id,
+            user_message=safe_message,
         )
 
     # ------------------------------------------------------------------
@@ -465,6 +494,75 @@ class LLMEngine(BaseEngine):
         prompt = self._build_followup_prompt(user_message, tool_name, tool_result)
         reply = self._call_ollama(self._build_messages(prompt))
         return reply or "Request processed."
+
+    def _load_conversation_history(self, phone: str, garage_id: int) -> list[dict[str, str]]:
+        try:
+            history = ai_memory_service.get_last_messages(
+                phone=phone,
+                garage_id=garage_id,
+                limit=self.max_memory_messages,
+            )
+        except Exception:
+            logger.exception(
+                "event=conversation_memory phase=load_error phone=%s garage_id=%s",
+                phone,
+                garage_id,
+            )
+            return []
+
+        logger.info(
+            "event=conversation_memory phase=load phone=%s garage_id=%s message_count=%d",
+            phone,
+            garage_id,
+            len(history),
+        )
+        return history
+
+    def _persist_conversation_turn(
+        self,
+        phone: str,
+        garage_id: int,
+        user_message: str,
+        assistant_reply: str,
+    ) -> None:
+        safe_user_message = user_message.strip()
+        safe_assistant_reply = assistant_reply.strip()
+        if not safe_user_message or not safe_assistant_reply:
+            return
+
+        try:
+            ai_memory_service.save_message(phone, garage_id, "user", safe_user_message)
+            ai_memory_service.save_message(phone, garage_id, "assistant", safe_assistant_reply)
+        except Exception:
+            logger.exception(
+                "event=conversation_memory phase=save_error phone=%s garage_id=%s",
+                phone,
+                garage_id,
+            )
+            return
+
+        logger.info(
+            "event=conversation_memory phase=save phone=%s garage_id=%s",
+            phone,
+            garage_id,
+        )
+
+    def _finalize_response(
+        self,
+        response: dict,
+        phone: str,
+        garage_id: int,
+        user_message: str,
+    ) -> dict:
+        reply = response.get("reply")
+        if isinstance(reply, str):
+            self._persist_conversation_turn(
+                phone=phone,
+                garage_id=garage_id,
+                user_message=user_message,
+                assistant_reply=reply,
+            )
+        return response
 
     # ------------------------------------------------------------------
     # JSON extraction helpers
