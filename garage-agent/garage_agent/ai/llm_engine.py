@@ -13,9 +13,8 @@ Provider: local Ollama instance (HTTP POST to /api/generate).
 import json
 import logging
 import os
-import subprocess
 import time as _time
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time
 from typing import Any
 
 import requests
@@ -24,7 +23,6 @@ from sqlalchemy.orm import Session
 from garage_agent.ai.base_engine import BaseEngine
 from garage_agent.ai.rule_engine import RuleEngine
 from garage_agent.ai.tools.registry import ToolRegistry
-from garage_agent.services import booking_service
 
 logger = logging.getLogger(__name__)
 
@@ -32,157 +30,34 @@ logger = logging.getLogger(__name__)
 # Default configuration
 # ---------------------------------------------------------------------------
 _DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434"
-_DEFAULT_OLLAMA_GENERATE_PATH = "/api/generate"
-_DEFAULT_OLLAMA_TAGS_PATH = "/api/tags"
-MODEL_NAME = "qwen3.5:2b"
-_DEFAULT_OLLAMA_MODEL = MODEL_NAME
-_DEFAULT_OLLAMA_TIMEOUT = 300  # seconds
+_DEFAULT_OLLAMA_MODEL = "qwen3.5:2b"
 _DEFAULT_OLLAMA_NUM_PREDICT = 120
-_MODEL_CHECK_TTL_SECONDS = 60
-_SIMPLE_MESSAGES = ["hi", "hello", "hey"]
-_DEFAULT_BOOKING_TIME = time(10, 0)
-
-_model_check_cache: dict[str, float] = {}
-
-
-def _normalize_ollama_base_url(raw_base_url: str) -> str:
-    normalized = (raw_base_url or _DEFAULT_OLLAMA_BASE_URL).strip().rstrip("/")
-    if normalized.endswith(_DEFAULT_OLLAMA_GENERATE_PATH):
-        normalized = normalized[: -len(_DEFAULT_OLLAMA_GENERATE_PATH)]
-    return normalized or _DEFAULT_OLLAMA_BASE_URL
-
-
-def _build_generate_url(base_url: str) -> str:
-    return f"{base_url}{_DEFAULT_OLLAMA_GENERATE_PATH}"
-
-
-def _build_tags_url(base_url: str) -> str:
-    return f"{base_url}{_DEFAULT_OLLAMA_TAGS_PATH}"
-
-
-def _ensure_ollama_server_available(base_url: str) -> None:
-    url = _build_tags_url(base_url)
-    try:
-        response = requests.get(url, timeout=5)
-        response.raise_for_status()
-    except requests.RequestException as exc:
-        logger.error("Ollama server not available")
-        logger.warning(
-            "event=ollama_health_check phase=error url=%s error=%s",
-            url,
-            str(exc)[:300],
-        )
-        raise RuntimeError("Ollama server not available") from exc
-
-
-def _ensure_ollama_model_available(model: str) -> None:
-    now = _time.time()
-    last_checked = _model_check_cache.get(model)
-    if last_checked and (now - last_checked) < _MODEL_CHECK_TTL_SECONDS:
-        return
-
-    try:
-        result = subprocess.run(
-            ["ollama", "list"],
-            capture_output=True,
-            text=True,
-            timeout=15,
-            check=False,
-        )
-    except FileNotFoundError as exc:
-        logger.error(
-            "event=ollama_model_check phase=command_missing model=%s error=%s",
-            model,
-            exc,
-        )
-        raise RuntimeError("Ollama CLI not found. Install Ollama and ensure `ollama` is on PATH.") from exc
-    except subprocess.TimeoutExpired as exc:
-        logger.error("event=ollama_model_check phase=timeout model=%s", model)
-        raise RuntimeError("Timed out while running `ollama list`.") from exc
-
-    if result.returncode != 0:
-        stderr = (result.stderr or "").strip()
-        logger.error(
-            "event=ollama_model_check phase=command_error model=%s return_code=%s stderr=%s",
-            model,
-            result.returncode,
-            stderr[:300],
-        )
-        raise RuntimeError(f"`ollama list` failed with return code {result.returncode}.")
-
-    available_models: set[str] = set()
-    for line in (result.stdout or "").splitlines():
-        parts = line.split()
-        if not parts:
-            continue
-        first_token = parts[0].strip()
-        if first_token.lower() in {"name", "model"}:
-            continue
-        available_models.add(first_token)
-
-    if model not in available_models:
-        logger.error(
-            "event=ollama_model_check phase=missing model=%s available_models=%s",
-            model,
-            sorted(available_models),
-        )
-        raise RuntimeError(
-            f"Ollama model '{model}' is not available. Run `ollama pull {model}`."
-        )
-
-    _model_check_cache[model] = now
-
-
-def select_relevant_tools(message: str) -> list[str]:
-    message = (message or "").lower()
-
-    if "book" in message or "service" in message:
-        return ["create_booking"]
-
-    if "reschedule" in message:
-        return ["reschedule_booking"]
-
-    if "cancel" in message:
-        return ["cancel_booking"]
-
-    if "job card" in message:
-        return ["create_jobcard"]
-
-    if "complete job" in message:
-        return ["complete_jobcard"]
-
-    if "summary" in message:
-        return ["daily_summary"]
-
-    return []
+_DEFAULT_OLLAMA_TIMEOUT = 300          # seconds – generous for CPU inference
+_DEFAULT_OLLAMA_KEEP_ALIVE = "30m"     # keep model resident in RAM
 
 
 class LLMEngine(BaseEngine):
     def __init__(self):
-        self._registry: ToolRegistry | None = None
+        self.registry = ToolRegistry()
         self.rule_engine = RuleEngine()
-        self.provider = (os.getenv("LLM_PROVIDER", "ollama") or "ollama").strip().lower()
 
-        self.ollama_base_url = _normalize_ollama_base_url(
-            os.getenv("OLLAMA_BASE_URL", _DEFAULT_OLLAMA_BASE_URL)
-        )
-        self.model = os.getenv("OLLAMA_MODEL", MODEL_NAME)
+        self.ollama_base_url = os.getenv("OLLAMA_BASE_URL", _DEFAULT_OLLAMA_BASE_URL).rstrip("/")
+        self.model = os.getenv("OLLAMA_MODEL", _DEFAULT_OLLAMA_MODEL)
 
         self.system_prompt = (
             "You are a garage service assistant. "
-            "Pick one backend tool when needed. "
-            "If required details are missing, ask one short question."
+            "When the request requires a backend action, select the best matching tool. "
+            "When information is missing, ask a short clarifying question."
         )
         self.tool_result_prompt = (
-            "A garage backend tool already ran successfully. "
-            "Write a short customer-friendly WhatsApp reply from the tool result. "
+            "A backend garage tool has already been executed successfully. "
+            "Write a concise, customer-friendly WhatsApp reply using the tool result. "
             "Do not mention internal implementation details."
         )
         self.tool_execution_failure_reply = "I couldn't complete that request. Please try again."
 
         logger.info(
-            "event=llm_engine_init provider=%s model=%s base_url=%s",
-            self.provider,
+            "event=llm_engine_init model=%s base_url=%s",
             self.model,
             self.ollama_base_url,
         )
@@ -191,43 +66,28 @@ class LLMEngine(BaseEngine):
     # Ollama HTTP transport
     # ------------------------------------------------------------------
 
-    @property
-    def registry(self) -> ToolRegistry:
-        if self._registry is None:
-            self._registry = ToolRegistry()
-        return self._registry
-
-    def _call_ollama(
-        self,
-        prompt: str,
-        *,
-        model: str | None = None,
-        num_predict: int = _DEFAULT_OLLAMA_NUM_PREDICT,
-    ) -> str:
+    def _call_ollama(self, prompt: str) -> str:
         """
         Send a prompt to the local Ollama instance and return the
-        generated text. Uses ``/api/generate`` with streaming disabled
-        and deterministic decoding tuned for CPU inference.
+        generated text.  Uses ``/api/generate`` with streaming disabled
+        and temperature fixed at 0 for deterministic output.
 
         Performance knobs (CPU-friendly):
-        * ``num_predict`` – bounds token generation cost.
-        * ``timeout``    – keep latency bounded for webhook UX.
+        * ``keep_alive`` – keeps the model loaded in RAM between calls.
+        * ``timeout``    – 300 s to tolerate slow CPU inference.
         * Latency is measured and logged on every call.
         """
-        logger.info("event=ollama_prompt_size tokens=%s", len(prompt))
-        _ensure_ollama_server_available(self.ollama_base_url)
-        target_model = model or self.model
-        _ensure_ollama_model_available(target_model)
-        url = _build_generate_url(self.ollama_base_url)
+        url = f"{self.ollama_base_url}/api/generate"
         payload = {
-            "model": target_model,
+            "model": self.model,
             "prompt": prompt,
             "stream": False,
             "temperature": 0,
-            "num_predict": num_predict,
+            "num_predict": _DEFAULT_OLLAMA_NUM_PREDICT,
             "think": False,
+            "keep_alive": _DEFAULT_OLLAMA_KEEP_ALIVE
         }
-        logger.info("event=ollama_call phase=start url=%s model=%s", url, target_model)
+        logger.info("event=ollama_call phase=start url=%s model=%s", url, self.model)
 
         start = _time.time()
         response = requests.post(url, json=payload, timeout=_DEFAULT_OLLAMA_TIMEOUT)
@@ -238,56 +98,18 @@ class LLMEngine(BaseEngine):
         generated_text = data.get("response", "").strip()
         logger.info(
             "event=ollama_call phase=success model=%s response_length=%d latency=%.2fs",
-            target_model,
+            len(prompt),
+            self.model,
             len(generated_text),
             duration,
         )
         return generated_text
 
-    def _call_model(
-        self,
-        prompt: str,
-        *,
-        model: str | None = None,
-        num_predict: int = _DEFAULT_OLLAMA_NUM_PREDICT,
-    ) -> str:
-        if self.provider == "ollama":
-            return self._call_ollama(prompt, model=model, num_predict=num_predict)
-        raise RuntimeError(f"Unsupported LLM provider: {self.provider}")
-
     # ------------------------------------------------------------------
     # Prompt builders
     # ------------------------------------------------------------------
 
-    def _build_booking_extraction_prompt(self, message: str) -> str:
-        return f"""
-Extract booking information from the message.
-
-User message:
-{message}
-
-Return JSON with fields:
-
-vehicle
-service
-date
-time
-
-If information is missing, return null.
-
-Example output:
-
-{{
-"vehicle": "Audi",
-"service": "general service",
-"date": null,
-"time": null
-}}
-
-Only return JSON.
-"""
-
-    def _build_tool_selection_prompt(self, user_message: str, tool_definitions: list[str]) -> str:
+    def _build_tool_selection_prompt(self, user_message: str) -> str:
         """
         Constructs a prompt that asks the LLM to decide whether a tool
         should be called or a conversational reply should be returned.
@@ -301,27 +123,29 @@ Only return JSON.
         Conversation (no tool needed):
             {"action": "conversation", "reply": "..."}
         """
-        tool_descriptions = self._get_tool_description_block(tool_definitions)
+        tool_descriptions = self._get_tool_description_block()
 
         prompt = (
             f"### SYSTEM\n{self.system_prompt}\n\n"
             f"### AVAILABLE TOOLS\n{tool_descriptions}\n\n"
             "### INSTRUCTIONS\n"
-            "Choose one action for the user message.\n"
-            "- Tool action: return JSON with \"action\"=<tool_name> and required args.\n"
-            "- Conversation action: return JSON {\"action\":\"conversation\",\"reply\":\"<text>\"}\n\n"
+            "Analyze the user message below and decide which action to take.\n"
+            "- If a backend tool should be called, respond with a JSON object "
+            "containing \"action\" set to the tool name and all required arguments.\n"
+            "- If no tool is needed (e.g. greeting or clarifying question), "
+            "respond with: {\"action\": \"conversation\", \"reply\": \"<your reply>\"}\n\n"
             "Rules:\n"
-            "1. Respond with one valid JSON object only (no markdown, no explanation).\n"
+            "1. Respond ONLY with a single valid JSON object — no extra text.\n"
             "2. Use the exact tool names listed above.\n"
-            "3. Keep keys minimal; include only required arguments.\n"
-            "4. Dates must be YYYY-MM-DD, times HH:MM (24-hour).\n"
-            "5. If required info is missing, ask a short clarifying question.\n\n"
+            "3. Dates must be in YYYY-MM-DD format, times in HH:MM (24-hour).\n"
+            "4. If required information is missing, use the conversation action "
+            "to ask a clarifying question.\n\n"
             f"### USER MESSAGE\n{user_message}\n\n"
             "### YOUR JSON RESPONSE\n"
         )
         return prompt
 
-    def _get_tool_description_block(self, tool_definitions: list[str]) -> str:
+    def _get_tool_description_block(self) -> str:
         """
         Return a compact list of available tool names.
 
@@ -329,28 +153,11 @@ Only return JSON.
         the model only needs to know *which* tools exist — the backend
         handles argument validation via ToolRegistry.
         """
-        if not tool_definitions:
+        tool_names = self.registry.list_tools()
+        if not tool_names:
             return "No tools available."
         # Plain newline-separated list — cheapest possible representation
-        return "\n".join(f"- {name}" for name in tool_definitions)
-
-    @staticmethod
-    def _is_simple_message(message: str) -> bool:
-        return message.lower().strip() in _SIMPLE_MESSAGES
-
-    def _get_tool_definitions_for_message(self, message: str) -> list[str]:
-        tool_names = select_relevant_tools(message)
-        logger.info("event=tool_router selected_tools=%s", tool_names)
-        if not tool_names:
-            logger.info("event=tool_registry phase=skipped reason=no_relevant_tools")
-            return []
-
-        tool_definitions = self.registry.get_tools(tool_names)
-        logger.info(
-            "event=tool_registry phase=loaded tool_count=%s",
-            len(tool_definitions),
-        )
-        return tool_definitions
+        return "\n".join(f"- {name}" for name in tool_names)
 
     def _build_followup_prompt(
         self,
@@ -369,8 +176,8 @@ Only return JSON.
             f"### EXECUTED TOOL\n{tool_name}\n\n"
             f"### TOOL RESULT (JSON)\n{tool_result_payload}\n\n"
             "### INSTRUCTIONS\n"
-            "Reply in plain text only. Keep it concise (max 2 short sentences). "
-            "Do not output JSON.\n"
+            "Generate a concise, customer-friendly WhatsApp reply based on "
+            "the tool result above. Do NOT output JSON — just the plain-text reply.\n"
         )
         return prompt
 
@@ -392,54 +199,14 @@ Only return JSON.
         if not safe_message:
             return self._conversation_response("Please provide more details so I can assist you.")
 
-        if self._is_simple_message(safe_message):
-            logger.info("event=simple_router phase=matched engine=rule")
-            return self._response_contract(
-                engine="rule",
-                response_type="conversation",
-                reply="Hello! How can I assist you with your car service today?",
-                tool=None,
-                arguments=None,
-                result=None,
-            )
-
-        # ----- Step 1: Router selects tool -----
-        selected_tools = self._get_tool_definitions_for_message(safe_message)
-        if not selected_tools:
-            return self._fallback_to_rule(
-                db=db,
-                garage_id=garage_id,
-                phone=phone,
-                message=safe_message,
-                reason="no_tool_selected",
-            )
-
-        tool_name = selected_tools[0]
-        if tool_name != "create_booking":
-            logger.info(
-                "event=tool_router phase=unsupported_selected_tool tool=%s",
-                tool_name,
-            )
-            return self._fallback_to_rule(
-                db=db,
-                garage_id=garage_id,
-                phone=phone,
-                message=safe_message,
-                reason="unsupported_selected_tool",
-            )
-
-        # ----- Step 2: Prompt model for argument extraction only -----
-        extraction_prompt = self._build_booking_extraction_prompt(safe_message)
+        # ----- Step 1: Ask model to decide intent / tool -----
+        tool_selection_prompt = self._build_tool_selection_prompt(safe_message)
         try:
-            logger.info("event=model_call phase=start mode=booking_extraction model=%s", MODEL_NAME)
-            raw_response = self._call_model(
-                extraction_prompt,
-                model=MODEL_NAME,
-                num_predict=80,
-            )
-            logger.info("event=model_call phase=success mode=booking_extraction model=%s", MODEL_NAME)
+            logger.info("event=model_call phase=start model=%s", self.model)
+            raw_response = self._call_ollama(tool_selection_prompt)
+            logger.info("event=model_call phase=success model=%s", self.model)
         except Exception as exc:
-            logger.exception("event=model_call phase=error mode=booking_extraction model=%s", MODEL_NAME)
+            logger.exception("event=model_call phase=error model=%s", self.model)
             return self._fallback_to_rule(
                 db=db,
                 garage_id=garage_id,
@@ -449,12 +216,12 @@ Only return JSON.
                 error=exc,
             )
 
-        # ----- Step 3: Parse JSON arguments -----
+        # ----- Step 2: Parse the JSON response -----
         try:
-            extracted_arguments = self._parse_booking_extraction_arguments(raw_response)
+            parsed = self._extract_json(raw_response)
         except ValueError as exc:
             logger.warning(
-                "event=model_call phase=json_parse_error mode=booking_extraction raw_response=%s",
+                "event=model_call phase=json_parse_error raw_response=%s",
                 raw_response[:300],
             )
             return self._fallback_to_rule(
@@ -466,42 +233,177 @@ Only return JSON.
                 error=exc,
             )
 
-        # ----- Step 4/5: Execute create_booking tool -----
-        logger.info("event=tool_execution phase=start tool=%s", tool_name)
-        try:
-            customer = booking_service.get_or_create_customer_by_phone(
+        action = parsed.get("action", "conversation")
+
+        # ----- Step 3a: Conversational reply (no tool) -----
+        if action == "conversation":
+            reply = parsed.get("reply", "Request processed.")
+            logger.info("event=tool_decision decision=conversation")
+            return self._conversation_response(reply)
+
+        # ----- Step 3b: Tool call -----
+        tool_name = action
+
+        if not self.registry.has_tool(tool_name):
+            logger.warning("event=tool_decision decision=unknown_tool tool=%s", tool_name)
+            return self._fallback_to_rule(
                 db=db,
                 garage_id=garage_id,
                 phone=phone,
+                message=safe_message,
+                reason="unknown_tool",
             )
-            booking_arguments = self._build_create_booking_arguments(
-                extracted_arguments=extracted_arguments,
-                customer_id=customer.id,
-            )
-            booking = booking_service.create_booking(
+
+        # Extract arguments (everything except "action")
+        raw_arguments = {k: v for k, v in parsed.items() if k != "action"}
+
+        try:
+            parsed_arguments = self._parse_tool_arguments(raw_arguments)
+        except ValueError as exc:
+            logger.warning("event=tool_decision decision=argument_parse_error tool=%s", tool_name)
+            return self._fallback_to_rule(
                 db=db,
                 garage_id=garage_id,
-                **booking_arguments,
+                phone=phone,
+                message=safe_message,
+                reason="tool_argument_parse_error",
+                error=exc,
             )
-            self._apply_vehicle_model_from_extraction(
+
+        arguments = self.registry.sanitize_arguments(tool_name, parsed_arguments)
+        logger.info(
+            "event=tool_decision decision=tool_selected tool=%s argument_keys=%s",
+            tool_name,
+            sorted(arguments.keys()),
+        )
+
+        # ----- Step 4: Execute the tool -----
+        logger.info("event=tool_execution phase=start tool=%s", tool_name)
+        try:
+            tool_execution = self.registry.execute(
+                tool_name=tool_name,
                 db=db,
-                booking=booking,
-                vehicle_label=extracted_arguments.get("vehicle"),
+                garage_id=garage_id,
+                **arguments,
             )
         except Exception:
             logger.exception("event=tool_execution phase=error tool=%s", tool_name)
             return self._tool_execution_failure_response()
 
-        serialized_result = self._make_json_safe(booking)
-        logger.info("event=tool_execution phase=finish tool=%s success=%s", tool_name, True)
+        if not isinstance(tool_execution, dict):
+            logger.warning(
+                "event=tool_execution phase=invalid_response tool=%s response_type=%s",
+                tool_name,
+                type(tool_execution).__name__,
+            )
+            return self._tool_execution_failure_response()
 
-        final_reply = self._build_booking_success_reply(extracted_arguments)
+        execution_success = bool(tool_execution.get("success"))
+        logger.info(
+            "event=tool_execution phase=finish tool=%s success=%s",
+            tool_name,
+            execution_success,
+        )
+        if not execution_success:
+            logger.warning(
+                "event=tool_execution phase=failed tool=%s error=%s",
+                tool_name,
+                tool_execution.get("error"),
+            )
+            return self._tool_execution_failure_response()
+
+        serialized_result = self._make_json_safe(tool_execution.get("data"))
+
+        # ----- Vehicle health special handling -----
+        if tool_name == "analyze_vehicle_health":
+            result = serialized_result if isinstance(serialized_result, dict) else {}
+            health_score = result.get(
+                "health_score",
+                result.get("vehicle_health_score", 100),
+            )
+            predicted_date = result.get("predicted_next_service_date")
+            recurring_issues = result.get("recurring_issues", [])
+            critical_flag = False
+
+            if health_score < 40 or len(recurring_issues) >= 3:
+                critical_flag = True
+
+            if critical_flag:
+                logger.warning(
+                    "CRITICAL VEHICLE CONDITION DETECTED | phone=%s | score=%s | recurring=%s",
+                    phone,
+                    health_score,
+                    len(recurring_issues),
+                )
+
+                from garage_agent.services.escalation_service import create_escalation
+
+                create_escalation(
+                    db=db,
+                    garage_id=garage_id,
+                    vehicle_id=arguments["vehicle_id"],
+                    reason="Critical health score or repeated issue",
+                    health_score=health_score,
+                )
+
+                escalation_message = "⚠️ Critical vehicle condition detected. Staff review required."
+            else:
+                escalation_message = None
+
+            if health_score >= 80:
+                urgency = "Low"
+                recommendation = "Vehicle condition is good."
+            elif health_score >= 50:
+                urgency = "Medium"
+                recommendation = "Service recommended soon."
+            else:
+                urgency = "High"
+                recommendation = "Immediate inspection advised."
+
+            message = (
+                f"Vehicle Health Score: {health_score}/100\n"
+                f"Urgency Level: {urgency}\n"
+                f"Predicted Next Service: {predicted_date}\n"
+                f"Recurring Issues: {len(recurring_issues)} detected\n\n"
+                f"Recommendation: {recommendation}"
+            )
+
+            return {
+                "engine": "llm",
+                "type": "intelligence_report",
+                "reply": message,
+                "tool": tool_name,
+                "result": result,
+                "critical": critical_flag,
+                "escalation_note": escalation_message,
+            }
+
+        # ----- Step 5: Generate follow-up reply via Ollama -----
+        try:
+            logger.info("event=model_call phase=followup_start model=%s tool=%s", self.model, tool_name)
+            final_reply = self._generate_tool_followup_reply(
+                user_message=safe_message,
+                tool_name=tool_name,
+                tool_result=serialized_result,
+            )
+            logger.info("event=model_call phase=followup_success model=%s tool=%s", self.model, tool_name)
+        except Exception as exc:
+            logger.exception("event=model_call phase=followup_error model=%s tool=%s", self.model, tool_name)
+            return self._fallback_to_rule(
+                db=db,
+                garage_id=garage_id,
+                phone=phone,
+                message=safe_message,
+                reason="ollama_followup_error",
+                error=exc,
+            )
+
         return self._response_contract(
             engine="llm",
             response_type="tool_call",
             reply=final_reply,
             tool=tool_name,
-            arguments=extracted_arguments,
+            arguments=arguments,
             result=serialized_result,
         )
 
@@ -516,135 +418,8 @@ Only return JSON.
         tool_result: Any,
     ) -> str:
         prompt = self._build_followup_prompt(user_message, tool_name, tool_result)
-        reply = self._call_model(prompt)
+        reply = self._call_ollama(prompt)
         return reply or "Request processed."
-
-    @staticmethod
-    def _normalize_optional_string(value: Any) -> str | None:
-        if value is None:
-            return None
-        if isinstance(value, (dict, list)):
-            return None
-        if not isinstance(value, str):
-            value = str(value)
-        normalized = value.strip()
-        return normalized or None
-
-    def _parse_booking_extraction_arguments(self, response: str) -> dict[str, Any]:
-        try:
-            arguments = json.loads(response)
-        except json.JSONDecodeError:
-            arguments = self._extract_json(response)
-
-        if not isinstance(arguments, dict):
-            raise ValueError("LLM output is not a JSON object.")
-
-        return {
-            "vehicle": self._normalize_optional_string(arguments.get("vehicle")),
-            "service": self._normalize_optional_string(arguments.get("service")),
-            "date": self._normalize_optional_string(arguments.get("date")),
-            "time": self._normalize_optional_string(arguments.get("time")),
-        }
-
-    @staticmethod
-    def _parse_extracted_date(raw_date: str | None) -> date | None:
-        if raw_date is None:
-            return None
-
-        normalized = raw_date.strip().lower()
-        if not normalized:
-            return None
-        if normalized == "today":
-            return date.today()
-        if normalized == "tomorrow":
-            return date.today() + timedelta(days=1)
-
-        for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"):
-            try:
-                return datetime.strptime(normalized, fmt).date()
-            except ValueError:
-                continue
-
-        current_year = date.today().year
-        try:
-            return datetime.strptime(f"{normalized}/{current_year}", "%d/%m/%Y").date()
-        except ValueError:
-            pass
-
-        try:
-            return datetime.strptime(f"{normalized}-{current_year}", "%d-%m-%Y").date()
-        except ValueError:
-            pass
-
-        return None
-
-    @staticmethod
-    def _parse_extracted_time(raw_time: str | None) -> time | None:
-        if raw_time is None:
-            return None
-
-        normalized = raw_time.strip().lower()
-        if not normalized:
-            return None
-        if normalized == "noon":
-            return time(12, 0)
-        if normalized == "midnight":
-            return time(0, 0)
-
-        compact_time = normalized.replace(" ", "").replace(".", ":")
-        for fmt in ("%H:%M", "%H", "%I:%M%p", "%I%p"):
-            try:
-                return datetime.strptime(compact_time, fmt).time()
-            except ValueError:
-                continue
-
-        return None
-
-    def _build_create_booking_arguments(
-        self,
-        extracted_arguments: dict[str, Any],
-        customer_id: int,
-    ) -> dict[str, Any]:
-        service = self._normalize_optional_string(extracted_arguments.get("service"))
-        service_type = "_".join(service.lower().split()) if service else "general_service"
-
-        parsed_date = self._parse_extracted_date(
-            self._normalize_optional_string(extracted_arguments.get("date"))
-        )
-        parsed_time = self._parse_extracted_time(
-            self._normalize_optional_string(extracted_arguments.get("time"))
-        )
-
-        return {
-            "customer_id": customer_id,
-            "service_type": service_type,
-            "service_date": parsed_date or date.today(),
-            "service_time": parsed_time or _DEFAULT_BOOKING_TIME,
-        }
-
-    @staticmethod
-    def _apply_vehicle_model_from_extraction(db: Session, booking: Any, vehicle_label: str | None) -> None:
-        normalized_vehicle = vehicle_label.strip() if isinstance(vehicle_label, str) else ""
-        if not normalized_vehicle:
-            return
-
-        vehicle = getattr(booking, "vehicle", None)
-        if vehicle is None:
-            return
-
-        if getattr(vehicle, "vehicle_model", None) == normalized_vehicle:
-            return
-
-        vehicle.vehicle_model = normalized_vehicle
-        db.commit()
-        db.refresh(booking)
-
-    @staticmethod
-    def _build_booking_success_reply(extracted_arguments: dict[str, Any]) -> str:
-        vehicle = extracted_arguments.get("vehicle")
-        if isinstance(vehicle, str) and vehicle.strip():
-            return f"Your {vehicle.strip()} service booking has been created."
-        return "Your service booking has been created."
 
     # ------------------------------------------------------------------
     # JSON extraction helpers
@@ -871,22 +646,18 @@ def warmup_llm() -> None:
     Safe to call at application startup — failures are logged and
     swallowed so they never prevent the server from starting.
     """
-    base_url = _normalize_ollama_base_url(
-        os.getenv("OLLAMA_BASE_URL", _DEFAULT_OLLAMA_BASE_URL)
-    )
-    model = os.getenv("OLLAMA_MODEL", MODEL_NAME)
-    url = _build_generate_url(base_url)
+    base_url = os.getenv("OLLAMA_BASE_URL", _DEFAULT_OLLAMA_BASE_URL).rstrip("/")
+    model = os.getenv("OLLAMA_MODEL", _DEFAULT_OLLAMA_MODEL)
+    url = f"{base_url}/api/generate"
     payload = {
         "model": model,
         "prompt": "hello",
         "stream": False,
-        "temperature": 0,
-        "num_predict": 16,
+        "keep_alive": _DEFAULT_OLLAMA_KEEP_ALIVE,
+        "options": {"temperature": 0},
     }
     logger.info("event=llm_warmup phase=start model=%s", model)
     try:
-        _ensure_ollama_server_available(base_url)
-        _ensure_ollama_model_available(model)
         start = _time.time()
         resp = requests.post(url, json=payload, timeout=_DEFAULT_OLLAMA_TIMEOUT)
         duration = _time.time() - start
