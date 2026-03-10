@@ -1,5 +1,5 @@
 """
-LLM Engine – Agentic Execution Layer (Ollama / qwen3.5:2b).
+LLM Engine – Agentic Execution Layer (Ollama / qwen3.5:0.8b).
 
 Responsible for:
 1. Understanding user intent (LLM or rule fallback)
@@ -68,10 +68,12 @@ Keep responses short, friendly, and helpful.
 """
 
 _DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434"
-_DEFAULT_OLLAMA_MODEL = "qwen3.5:2b"
+_DEFAULT_OLLAMA_MODEL = "qwen3.5:0.8b"
 _DEFAULT_OLLAMA_NUM_PREDICT = 120
+_DEFAULT_OLLAMA_FOLLOWUP_NUM_PREDICT = 200  # higher limit for follow-up replies
 _DEFAULT_OLLAMA_TIMEOUT = 300          # seconds – generous for CPU inference
 _DEFAULT_OLLAMA_KEEP_ALIVE = "30m"     # keep model resident in RAM
+_DEFAULT_OLLAMA_RETRIES = 2            # retry count for transient Ollama failures
 _DEFAULT_MEMORY_MESSAGE_LIMIT = 10
 
 
@@ -114,7 +116,11 @@ class LLMEngine(BaseEngine):
         messages.append({"role": "user", "content": user_message})
         return messages
 
-    def _call_ollama(self, messages: list[dict[str, str]]) -> str:
+    def _call_ollama(
+        self,
+        messages: list[dict[str, str]],
+        num_predict: int = _DEFAULT_OLLAMA_NUM_PREDICT,
+    ) -> str:
         """
         Send chat messages to the local Ollama instance and return the
         generated assistant text. Uses ``/api/chat`` with streaming
@@ -123,6 +129,8 @@ class LLMEngine(BaseEngine):
         Performance knobs (CPU-friendly):
         * ``keep_alive`` – keeps the model loaded in RAM between calls.
         * ``timeout``    – 300 s to tolerate slow CPU inference.
+        * ``num_predict`` – configurable max tokens per call.
+        * Automatic retry with exponential backoff for transient failures.
         * Latency is measured and logged on every call.
         """
         url = f"{self.ollama_base_url}/api/chat"
@@ -132,28 +140,46 @@ class LLMEngine(BaseEngine):
             "stream": False,
             "options": {
                 "temperature": 0,
-                "num_predict": _DEFAULT_OLLAMA_NUM_PREDICT,
+                "num_predict": num_predict,
             },
             "think": False,
             "keep_alive": _DEFAULT_OLLAMA_KEEP_ALIVE
         }
         logger.info("event=ollama_call phase=start url=%s model=%s", url, self.model)
 
-        start = _time.time()
-        response = requests.post(url, json=payload, timeout=_DEFAULT_OLLAMA_TIMEOUT)
-        duration = _time.time() - start
+        last_error: Exception | None = None
+        for attempt in range(1, _DEFAULT_OLLAMA_RETRIES + 1):
+            try:
+                start = _time.time()
+                response = requests.post(url, json=payload, timeout=_DEFAULT_OLLAMA_TIMEOUT)
+                duration = _time.time() - start
 
-        response.raise_for_status()
-        data = response.json()
-        generated_text = data.get("message", {}).get("content", "").strip()
-        logger.info(
-            "event=ollama_call phase=success model=%s message_count=%d response_length=%d latency=%.2fs",
-            self.model,
-            len(messages),
-            len(generated_text),
-            duration,
-        )
-        return generated_text
+                response.raise_for_status()
+                data = response.json()
+                generated_text = data.get("message", {}).get("content", "").strip()
+                logger.info(
+                    "event=ollama_call phase=success model=%s message_count=%d response_length=%d latency=%.2fs attempt=%d",
+                    self.model,
+                    len(messages),
+                    len(generated_text),
+                    duration,
+                    attempt,
+                )
+                return generated_text
+            except Exception as exc:
+                last_error = exc
+                logger.warning(
+                    "event=ollama_call phase=retry model=%s attempt=%d/%d error=%s",
+                    self.model,
+                    attempt,
+                    _DEFAULT_OLLAMA_RETRIES,
+                    str(exc),
+                )
+                if attempt < _DEFAULT_OLLAMA_RETRIES:
+                    _time.sleep(min(2 ** attempt, 4))  # exponential backoff, max 4s
+
+        # All retries exhausted — raise the last error
+        raise last_error  # type: ignore[misc]
 
     # ------------------------------------------------------------------
     # Prompt builders
@@ -263,18 +289,30 @@ class LLMEngine(BaseEngine):
         # ----- Step 2: Parse the JSON response -----
         try:
             parsed = self._extract_json(raw_response)
-        except ValueError as exc:
-            logger.warning(
-                "event=model_call phase=json_parse_error raw_response=%s",
-                raw_response[:300],
-            )
+        except ValueError:
+            # Smaller models (e.g. qwen3.5:0.8b) may return plain
+            # conversational text instead of JSON.  Use the raw LLM
+            # reply directly rather than discarding it.
+            clean_reply = raw_response.strip()
+            if clean_reply:
+                logger.info(
+                    "event=model_call phase=json_fallback_to_plain_text response_length=%d",
+                    len(clean_reply),
+                )
+                return self._finalize_response(
+                    response=self._conversation_response(clean_reply),
+                    phone=phone,
+                    garage_id=garage_id,
+                    user_message=safe_message,
+                )
+            # Truly empty response — fall back to rule engine
+            logger.warning("event=model_call phase=json_parse_error raw_response=<empty>")
             return self._fallback_to_rule(
                 db=db,
                 garage_id=garage_id,
                 phone=phone,
                 message=safe_message,
-                reason="ollama_json_parse_error",
-                error=exc,
+                reason="ollama_json_parse_empty",
             )
 
         action = parsed.get("action", "conversation")
@@ -392,6 +430,7 @@ class LLMEngine(BaseEngine):
             if health_score < 40 or len(recurring_issues) >= 3:
                 critical_flag = True
 
+            escalation_message = None
             if critical_flag:
                 logger.warning(
                     "CRITICAL VEHICLE CONDITION DETECTED | phone=%s | score=%s | recurring=%s",
@@ -400,19 +439,32 @@ class LLMEngine(BaseEngine):
                     len(recurring_issues),
                 )
 
-                from garage_agent.services.escalation_service import create_escalation
+                vehicle_id = arguments.get("vehicle_id")
+                if vehicle_id is not None:
+                    try:
+                        from garage_agent.services.escalation_service import create_escalation
 
-                create_escalation(
-                    db=db,
-                    garage_id=garage_id,
-                    vehicle_id=arguments["vehicle_id"],
-                    reason="Critical health score or repeated issue",
-                    health_score=health_score,
-                )
+                        create_escalation(
+                            db=db,
+                            garage_id=garage_id,
+                            vehicle_id=vehicle_id,
+                            reason="Critical health score or repeated issue",
+                            health_score=health_score,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "event=escalation phase=error phone=%s garage_id=%s vehicle_id=%s",
+                            phone,
+                            garage_id,
+                            vehicle_id,
+                        )
+                else:
+                    logger.warning(
+                        "event=escalation phase=skipped reason=missing_vehicle_id phone=%s",
+                        phone,
+                    )
 
                 escalation_message = "⚠️ Critical vehicle condition detected. Staff review required."
-            else:
-                escalation_message = None
 
             if health_score >= 80:
                 urgency = "Low"
@@ -424,7 +476,7 @@ class LLMEngine(BaseEngine):
                 urgency = "High"
                 recommendation = "Immediate inspection advised."
 
-            message = (
+            health_reply = (
                 f"Vehicle Health Score: {health_score}/100\n"
                 f"Urgency Level: {urgency}\n"
                 f"Predicted Next Service: {predicted_date}\n"
@@ -434,13 +486,13 @@ class LLMEngine(BaseEngine):
 
             return self._finalize_response(
                 response={
-                "engine": "llm",
-                "type": "intelligence_report",
-                "reply": message,
-                "tool": tool_name,
-                "result": result,
-                "critical": critical_flag,
-                "escalation_note": escalation_message,
+                    "engine": "llm",
+                    "type": "intelligence_report",
+                    "reply": health_reply,
+                    "tool": tool_name,
+                    "result": result,
+                    "critical": critical_flag,
+                    "escalation_note": escalation_message,
                 },
                 phone=phone,
                 garage_id=garage_id,
@@ -454,6 +506,7 @@ class LLMEngine(BaseEngine):
                 user_message=safe_message,
                 tool_name=tool_name,
                 tool_result=serialized_result,
+                history=history,
             )
             logger.info("event=model_call phase=followup_success model=%s tool=%s", self.model, tool_name)
         except Exception as exc:
@@ -490,9 +543,13 @@ class LLMEngine(BaseEngine):
         user_message: str,
         tool_name: str,
         tool_result: Any,
+        history: list[dict[str, str]] | None = None,
     ) -> str:
         prompt = self._build_followup_prompt(user_message, tool_name, tool_result)
-        reply = self._call_ollama(self._build_messages(prompt))
+        reply = self._call_ollama(
+            self._build_messages(prompt, history=history),
+            num_predict=_DEFAULT_OLLAMA_FOLLOWUP_NUM_PREDICT,
+        )
         return reply or "Request processed."
 
     def _load_conversation_history(self, phone: str, garage_id: int) -> list[dict[str, str]]:

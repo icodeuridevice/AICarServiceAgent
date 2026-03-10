@@ -19,5 +19,6 @@ class RuleEngine(BaseEngine):
             "type": "conversation",
             "reply": "Request processed.",
             "tool": None,
+            "arguments": None,
             "result": None,
         }
