@@ -1,5 +1,5 @@
 """
-LLM Engine – Agentic Execution Layer (Ollama / qwen3.5:0.8b).
+LLM Engine – Agentic Execution Layer (multi-provider).
 
 Responsible for:
 1. Understanding user intent (LLM or rule fallback)
@@ -7,7 +7,7 @@ Responsible for:
 3. Executing selected tools via registry
 4. Returning structured response payload
 
-Provider: local Ollama instance (HTTP POST to /api/chat).
+Provider: configurable via LLM_PROVIDER env var (gemini/openai/claude/openrouter/ollama).
 """
 
 import json
@@ -21,6 +21,7 @@ import requests
 from sqlalchemy.orm import Session
 
 from garage_agent.ai.base_engine import BaseEngine
+from garage_agent.ai.provider_router import get_provider, get_provider_name
 from garage_agent.ai.rule_engine import RuleEngine
 from garage_agent.ai.tools.registry import ToolRegistry
 from garage_agent.services import ai_memory_service
@@ -82,6 +83,9 @@ class LLMEngine(BaseEngine):
         self.registry = ToolRegistry()
         self.rule_engine = RuleEngine()
 
+        # Multi-provider: instantiate the configured LLM provider
+        self.provider = get_provider()
+
         self.ollama_base_url = os.getenv("OLLAMA_BASE_URL", _DEFAULT_OLLAMA_BASE_URL).rstrip("/")
         self.model = os.getenv("OLLAMA_MODEL", _DEFAULT_OLLAMA_MODEL)
 
@@ -95,9 +99,9 @@ class LLMEngine(BaseEngine):
         self.tool_execution_failure_reply = "I couldn't complete that request. Please try again."
 
         logger.info(
-            "event=llm_engine_init model=%s base_url=%s",
+            "event=llm_engine_init provider=%s model=%s",
+            get_provider_name(),
             self.model,
-            self.ollama_base_url,
         )
 
     # ------------------------------------------------------------------
@@ -272,9 +276,9 @@ class LLMEngine(BaseEngine):
             system_prompt=self._build_tool_selection_system_prompt(),
         )
         try:
-            logger.info("event=model_call phase=start model=%s", self.model)
-            raw_response = self._call_ollama(tool_selection_messages)
-            logger.info("event=model_call phase=success model=%s", self.model)
+            logger.info("event=model_call phase=start provider=%s", get_provider_name())
+            raw_response = self.provider.generate(tool_selection_messages)
+            logger.info("event=model_call phase=success provider=%s", get_provider_name())
         except Exception as exc:
             logger.exception("event=model_call phase=error model=%s", self.model)
             return self._fallback_to_rule(
@@ -546,9 +550,8 @@ class LLMEngine(BaseEngine):
         history: list[dict[str, str]] | None = None,
     ) -> str:
         prompt = self._build_followup_prompt(user_message, tool_name, tool_result)
-        reply = self._call_ollama(
+        reply = self.provider.generate(
             self._build_messages(prompt, history=history),
-            num_predict=_DEFAULT_OLLAMA_FOLLOWUP_NUM_PREDICT,
         )
         return reply or "Request processed."
 
@@ -840,32 +843,23 @@ class LLMEngine(BaseEngine):
 
 def warmup_llm() -> None:
     """
-    Send a tiny prompt to Ollama so that the model is loaded into
-    memory *before* the first real user request arrives.
+    Warm up the LLM provider before serving traffic.
+
+    For Ollama this sends a tiny prompt so the model is loaded into
+    RAM.  Other providers do not require warmup.
 
     Safe to call at application startup — failures are logged and
     swallowed so they never prevent the server from starting.
     """
-    base_url = os.getenv("OLLAMA_BASE_URL", _DEFAULT_OLLAMA_BASE_URL).rstrip("/")
-    model = os.getenv("OLLAMA_MODEL", _DEFAULT_OLLAMA_MODEL)
-    url = f"{base_url}/api/generate"
-    payload = {
-        "model": model,
-        "prompt": "hello",
-        "stream": False,
-        "keep_alive": _DEFAULT_OLLAMA_KEEP_ALIVE,
-        "options": {"temperature": 0},
-    }
-    logger.info("event=llm_warmup phase=start model=%s", model)
+    provider_name = get_provider_name()
+    if provider_name != "ollama":
+        logger.info("event=llm_warmup phase=skip provider=%s (warmup not needed)", provider_name)
+        return
+
     try:
-        start = _time.time()
-        resp = requests.post(url, json=payload, timeout=_DEFAULT_OLLAMA_TIMEOUT)
-        duration = _time.time() - start
-        resp.raise_for_status()
-        logger.info(
-            "event=llm_warmup phase=success model=%s latency=%.2fs",
-            model,
-            duration,
-        )
+        from garage_agent.ai.providers.ollama_provider import OllamaProvider
+        provider = get_provider()
+        if isinstance(provider, OllamaProvider):
+            provider.warmup()
     except Exception:
-        logger.exception("event=llm_warmup phase=error model=%s", model)
+        logger.exception("event=llm_warmup phase=error provider=%s", provider_name)
