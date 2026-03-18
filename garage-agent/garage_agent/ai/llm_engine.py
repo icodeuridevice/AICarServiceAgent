@@ -12,6 +12,7 @@ Provider: configurable via LLM_PROVIDER env var (gemini/openai/claude/openrouter
 
 import json
 import logging
+import re
 import os
 import time as _time
 from datetime import date, datetime, time
@@ -25,8 +26,75 @@ from garage_agent.ai.provider_router import get_provider, get_provider_name
 from garage_agent.ai.rule_engine import RuleEngine
 from garage_agent.ai.tools.registry import ToolRegistry
 from garage_agent.services import ai_memory_service
+from garage_agent.services import conversation_service
+from garage_agent.services.booking_service import get_or_create_customer_by_phone
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Context field extraction – regex & keyword patterns
+# ---------------------------------------------------------------------------
+_DATE_RE = re.compile(r"\b(\d{4}-\d{2}-\d{2})\b")
+_TIME_RE = re.compile(r"\b(\d{2}:\d{2})\b")
+
+_VEHICLE_BRANDS = {
+    "audi", "bmw", "mercedes", "toyota", "honda",
+    "hyundai", "kia", "ford", "chevrolet", "nissan",
+    "volkswagen", "mazda", "subaru", "lexus", "volvo",
+}
+
+_SERVICE_TYPE_KEYWORDS = {
+    "routine": "routine",
+    "maintenance": "maintenance",
+    "oil": "oil_change",
+    "inspection": "inspection",
+    "repair": "repair",
+    "service": "general_service",
+    "brake": "brake_service",
+    "tire": "tire_service",
+    "battery": "battery_service",
+}
+
+
+def extract_fields_from_message(message: str, context: dict) -> dict:
+    """Scan *message* for booking-related fields and merge into *context*.
+
+    Supported fields: vehicle, service_type, service_date, service_time.
+    New detections **overwrite** existing context values so the user can
+    correct earlier answers.
+
+    Returns the (mutated) context dict for convenience.
+    """
+    lower = message.lower()
+
+    # --- Vehicle brand ---
+    for brand in _VEHICLE_BRANDS:
+        if brand in lower:
+            context["vehicle"] = brand
+            logger.info("event=context_field_extracted field=vehicle value=%s", brand)
+            break
+
+    # --- Service type ---
+    for keyword, service_value in _SERVICE_TYPE_KEYWORDS.items():
+        if keyword in lower:
+            context["service_type"] = service_value
+            logger.info("event=context_field_extracted field=service_type value=%s", service_value)
+            break
+
+    # --- Date (YYYY-MM-DD) ---
+    date_match = _DATE_RE.search(message)
+    if date_match:
+        context["service_date"] = date_match.group(1)
+        logger.info("event=context_field_extracted field=service_date value=%s", date_match.group(1))
+
+    # --- Time (HH:MM) ---
+    time_match = _TIME_RE.search(message)
+    if time_match:
+        context["service_time"] = time_match.group(1)
+        logger.info("event=context_field_extracted field=service_time value=%s", time_match.group(1))
+
+    return context
+
 
 # ---------------------------------------------------------------------------
 # Default configuration
@@ -268,6 +336,17 @@ class LLMEngine(BaseEngine):
         if not safe_message:
             return self._conversation_response("Please provide more details so I can assist you.")
 
+        # ----- Context extraction & persistence -----
+        context = conversation_service.get_data(phone)
+        extract_fields_from_message(safe_message, context)
+        for key, value in context.items():
+            conversation_service.update_data(phone, key, value)
+        logger.info(
+            "event=context_state phone=%s context_keys=%s",
+            phone,
+            sorted(context.keys()),
+        )
+
         # ----- Step 1: Ask model to decide intent / tool -----
         history = self._load_conversation_history(phone=phone, garage_id=garage_id)
         tool_selection_messages = self._build_messages(
@@ -368,14 +447,63 @@ class LLMEngine(BaseEngine):
             sorted(arguments.keys()),
         )
 
-        # ----- Step 4: Execute the tool -----
+        # ----- Step 4: Merge conversation context into arguments -----
+        merged_args = {**context, **arguments}  # LLM args take priority
+        merged_args = self.registry.sanitize_arguments(tool_name, merged_args)
+        logger.info(
+            "event=context_argument_merge context_keys=%s llm_keys=%s final_keys=%s",
+            sorted(context.keys()),
+            sorted(arguments.keys()),
+            sorted(merged_args.keys()),
+        )
+
+        # ----- Step 4a: Auto-resolve customer_id for create_booking -----
+        if tool_name == "create_booking" and "customer_id" not in merged_args:
+            try:
+                customer = get_or_create_customer_by_phone(
+                    db=db, garage_id=garage_id, phone=phone,
+                )
+                merged_args["customer_id"] = customer.id
+                logger.info(
+                    "event=customer_auto_resolved phone=%s customer_id=%s",
+                    phone,
+                    customer.id,
+                )
+            except Exception:
+                logger.exception(
+                    "event=customer_auto_resolve phase=error phone=%s",
+                    phone,
+                )
+
+        # ----- Step 4b: Guard – check required fields for create_booking -----
+        if tool_name == "create_booking":
+            required_fields = {"customer_id", "service_type", "service_date", "service_time"}
+            missing = sorted(required_fields - set(merged_args.keys()))
+            if missing:
+                friendly = ", ".join(f.replace("_", " ") for f in missing)
+                reply = (
+                    f"I just need one more detail before completing the booking: "
+                    f"{friendly}."
+                )
+                logger.info(
+                    "event=booking_guard_missing fields=%s",
+                    missing,
+                )
+                return self._finalize_response(
+                    response=self._conversation_response(reply),
+                    phone=phone,
+                    garage_id=garage_id,
+                    user_message=safe_message,
+                )
+
+        # ----- Step 5: Execute the tool -----
         logger.info("event=tool_execution phase=start tool=%s", tool_name)
         try:
             tool_execution = self.registry.execute(
                 tool_name=tool_name,
                 db=db,
                 garage_id=garage_id,
-                **arguments,
+                **merged_args,
             )
         except Exception:
             logger.exception("event=tool_execution phase=error tool=%s", tool_name)
@@ -405,6 +533,11 @@ class LLMEngine(BaseEngine):
             tool_name,
             execution_success,
         )
+
+        # Clear conversation context after successful booking
+        if execution_success and tool_name == "create_booking":
+            conversation_service.clear_state(phone)
+            logger.info("event=context_cleared phone=%s reason=booking_success", phone)
         if not execution_success:
             logger.warning(
                 "event=tool_execution phase=failed tool=%s error=%s",
