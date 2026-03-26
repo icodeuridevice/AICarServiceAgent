@@ -63,15 +63,42 @@ def extract_fields_from_message(message: str, context: dict) -> dict:
     New detections **overwrite** existing context values so the user can
     correct earlier answers.
 
+    The ``vehicle`` field is stored as a dict ``{"brand": str, "model": str | None}``
+    to support downstream vehicle persistence.
+
     Returns the (mutated) context dict for convenience.
     """
     lower = message.lower()
 
-    # --- Vehicle brand ---
+    # --- Vehicle brand + model ---
     for brand in _VEHICLE_BRANDS:
         if brand in lower:
-            context["vehicle"] = brand
-            logger.info("event=context_field_extracted field=vehicle value=%s", brand)
+            # Try to capture the model text after the brand keyword.
+            # e.g. "Mercedes Maybach S680" → brand=mercedes, model=maybach s680
+            pattern = re.compile(
+                rf"\b{re.escape(brand)}\b\s*([\w\s]*)",
+                re.IGNORECASE,
+            )
+            match = pattern.search(message)
+            model_text: str | None = None
+            if match:
+                raw_model = match.group(1).strip()
+                # Remove trailing noise words that are clearly not part of the model
+                noise = {"for", "on", "at", "service", "repair", "maintenance", "inspection", "that", "needs", "need"}
+                model_parts = []
+                for word in raw_model.split():
+                    if word.lower() in noise:
+                        break
+                    model_parts.append(word)
+                if model_parts:
+                    model_text = " ".join(model_parts).lower()
+
+            context["vehicle"] = {"brand": brand, "model": model_text}
+            logger.info(
+                "event=context_field_extracted field=vehicle brand=%s model=%s",
+                brand,
+                model_text,
+            )
             break
 
     # --- Service type ---

@@ -7,6 +7,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from garage_agent.db.models import Booking, Customer, ServiceBay, Vehicle
+from garage_agent.services.vehicle_service import get_or_create_vehicle
 from garage_agent.services.audit_service import create_audit_log
 from garage_agent.services.slot_service import (
     get_available_slot,
@@ -70,8 +71,19 @@ def get_or_create_customer_by_phone(db: Session, garage_id: int, phone: str) -> 
     return customer
 
 
-def _get_or_create_vehicle_for_customer(db: Session, customer_id: int, garage_id: int) -> Vehicle:
-    """Return the customer's first vehicle, creating one when missing."""
+def _get_or_create_vehicle_for_customer(
+    db: Session,
+    customer_id: int,
+    garage_id: int,
+    brand: str | None = None,
+    model: str | None = None,
+) -> Vehicle:
+    """Return the customer's vehicle, creating one when missing.
+
+    When *brand* is provided the lookup uses the vehicle service for
+    precise brand/model matching.  Without a brand the legacy behaviour
+    (return first vehicle, or create an empty one) is preserved.
+    """
     customer = db.scalar(
         select(Customer)
         .where(Customer.id == customer_id)
@@ -80,6 +92,17 @@ def _get_or_create_vehicle_for_customer(db: Session, customer_id: int, garage_id
     if customer is None:
         raise ValueError("Customer not found.")
 
+    # --- Use vehicle service when brand info is available ---
+    if brand is not None:
+        return get_or_create_vehicle(
+            db=db,
+            garage_id=garage_id,
+            customer_id=customer_id,
+            brand=brand,
+            model=model,
+        )
+
+    # --- Legacy fallback: first vehicle or create empty ---
     vehicle = db.scalar(
         select(Vehicle)
         .where(Vehicle.customer_id == customer_id)
@@ -106,6 +129,7 @@ def _apply_completion_intelligence(db: Session, garage_id: int, booking: Booking
     if booking.vehicle is None:
         raise ValueError("Booking vehicle not found.")
 
+    booking.vehicle.last_service_date = booking.service_date
     booking.vehicle.next_service_due_date = calculate_next_service(
         service_type=booking.service_type,
         service_date=booking.service_date,
@@ -138,6 +162,7 @@ def create_booking(
     service_type: str,
     service_date: date,
     service_time: time,
+    vehicle: dict | None = None,
 ) -> Booking:
     """Create a booking when the requested slot has no active conflict."""
     if check_slot_conflict(
@@ -196,14 +221,31 @@ def create_booking(
         reserve_slot(db=db, slot=slot)
         assigned_bay_id = slot.bay_id
 
+    # --- Extract vehicle brand/model ---
+    v_brand: str | None = None
+    v_model: str | None = None
+    if isinstance(vehicle, dict):
+        v_brand = vehicle.get("brand")
+        v_model = vehicle.get("model")
+
     try:
-        vehicle = _get_or_create_vehicle_for_customer(
+        resolved_vehicle = _get_or_create_vehicle_for_customer(
             db=db,
             customer_id=customer_id,
             garage_id=garage_id,
+            brand=v_brand,
+            model=v_model,
         )
+
+        logger.info(
+            "event=vehicle_linked_to_booking vehicle_id=%s brand=%s model=%s",
+            resolved_vehicle.id,
+            v_brand,
+            v_model,
+        )
+
         booking = Booking(
-            vehicle_id=vehicle.id,
+            vehicle_id=resolved_vehicle.id,
             garage_id=garage_id,
             service_type=service_type,
             service_date=service_date,

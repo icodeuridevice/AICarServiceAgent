@@ -24,6 +24,7 @@ def tool_create_booking(
     service_type: str,
     service_date: date,
     service_time: time,
+    vehicle: dict | None = None,
 ):
     return create_booking(
         db=db,
@@ -32,6 +33,7 @@ def tool_create_booking(
         service_type=service_type,
         service_date=service_date,
         service_time=service_time,
+        vehicle=vehicle,
     )
 
 

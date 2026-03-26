@@ -59,6 +59,7 @@ class ToolRegistry:
                 "service_type",
                 "service_date",
                 "service_time",
+                "vehicle",
             },
             "reschedule_booking": {
                 "booking_id",
@@ -99,6 +100,7 @@ class ToolRegistry:
                 "service_type": str,
                 "service_date": date,
                 "service_time": time,
+                "vehicle": dict | None,
             },
             "reschedule_booking": {
                 "booking_id": int,

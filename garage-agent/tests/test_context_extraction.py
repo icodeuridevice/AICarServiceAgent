@@ -6,7 +6,7 @@ from garage_agent.ai.llm_engine import extract_fields_from_message
 
 
 # ---------------------------------------------------------------------------
-# Vehicle brand detection
+# Vehicle brand + model detection
 # ---------------------------------------------------------------------------
 
 class TestVehicleDetection:
@@ -17,15 +17,30 @@ class TestVehicleDetection:
     ])
     def test_detects_brand(self, brand):
         ctx = extract_fields_from_message(f"Book my {brand.title()} for service", {})
-        assert ctx["vehicle"] == brand
+        assert ctx["vehicle"]["brand"] == brand
 
     def test_brand_case_insensitive(self):
         ctx = extract_fields_from_message("I have a BMW that needs repair", {})
-        assert ctx["vehicle"] == "bmw"
+        assert ctx["vehicle"]["brand"] == "bmw"
 
     def test_no_brand_does_not_set_vehicle(self):
         ctx = extract_fields_from_message("I need to book a service", {})
         assert "vehicle" not in ctx
+
+    def test_brand_with_model(self):
+        ctx = extract_fields_from_message("Book my Mercedes Maybach S680 for service", {})
+        assert ctx["vehicle"]["brand"] == "mercedes"
+        assert ctx["vehicle"]["model"] == "maybach s680"
+
+    def test_brand_without_model(self):
+        ctx = extract_fields_from_message("Book my BMW for service", {})
+        assert ctx["vehicle"]["brand"] == "bmw"
+        assert ctx["vehicle"]["model"] is None
+
+    def test_brand_model_noise_stripped(self):
+        ctx = extract_fields_from_message("Mercedes C Class needs repair", {})
+        assert ctx["vehicle"]["brand"] == "mercedes"
+        assert ctx["vehicle"]["model"] == "c class"
 
 
 # ---------------------------------------------------------------------------
@@ -98,7 +113,7 @@ class TestCombinedExtraction:
         ctx = extract_fields_from_message(
             "Book my Audi for routine on 2026-03-17 at 15:35", {}
         )
-        assert ctx["vehicle"] == "audi"
+        assert ctx["vehicle"]["brand"] == "audi"
         assert ctx["service_type"] == "routine"
         assert ctx["service_date"] == "2026-03-17"
         assert ctx["service_time"] == "15:35"
@@ -106,12 +121,12 @@ class TestCombinedExtraction:
     def test_incremental_context(self):
         ctx: dict = {}
         extract_fields_from_message("Book my BMW for service", ctx)
-        assert ctx["vehicle"] == "bmw"
+        assert ctx["vehicle"]["brand"] == "bmw"
         assert ctx["service_type"] == "general_service"
 
         extract_fields_from_message("Routine", ctx)
         assert ctx["service_type"] == "routine"
-        assert ctx["vehicle"] == "bmw"  # preserved
+        assert ctx["vehicle"]["brand"] == "bmw"  # preserved
 
         extract_fields_from_message("Date: 2026-03-17 Time: 15:35", ctx)
         assert ctx["service_date"] == "2026-03-17"
@@ -120,12 +135,12 @@ class TestCombinedExtraction:
         assert set(ctx.keys()) >= {"vehicle", "service_type", "service_date", "service_time"}
 
     def test_overwrite_existing(self):
-        ctx = {"vehicle": "bmw", "service_type": "repair"}
+        ctx = {"vehicle": {"brand": "bmw", "model": None}, "service_type": "repair"}
         extract_fields_from_message("Actually, Audi for routine", ctx)
-        assert ctx["vehicle"] == "audi"
+        assert ctx["vehicle"]["brand"] == "audi"
         assert ctx["service_type"] == "routine"
 
     def test_empty_message(self):
-        ctx = {"vehicle": "bmw"}
+        ctx = {"vehicle": {"brand": "bmw", "model": None}}
         extract_fields_from_message("", ctx)
-        assert ctx == {"vehicle": "bmw"}  # unchanged
+        assert ctx == {"vehicle": {"brand": "bmw", "model": None}}  # unchanged
