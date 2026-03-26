@@ -5,18 +5,19 @@ that fetches today's active bookings and sends WhatsApp reminders via Twilio.
 """
 
 import logging
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from sqlalchemy import select
 from sqlalchemy.orm import joinedload
 
-from garage_agent.db.models import Booking, Reminder, Vehicle, Customer, Garage
+from garage_agent.db.models import Booking, Garage, Reminder, Vehicle, Customer
 from garage_agent.db.session import SessionLocal
 from garage_agent.services.predictive_reminder_service import (
     get_due_vehicles,
     mark_reminder_sent,
 )
+from garage_agent.services.slot_service import generate_daily_slots
 from garage_agent.services.twilio_client import send_whatsapp_message
 
 logger = logging.getLogger(__name__)
@@ -158,12 +159,47 @@ def _send_daily_reminders(garage_id: int) -> None:
         db.close()
 
 
+def _generate_tomorrow_slots(garage_id: int) -> None:
+    """Auto-generate time slots for the next day."""
+    tomorrow = date.today() + timedelta(days=1)
+    logger.info(
+        "Running slot generation job for %s (garage_id=%s)",
+        tomorrow,
+        garage_id,
+    )
+    db = SessionLocal()
+    try:
+        created = generate_daily_slots(db=db, garage_id=garage_id, target_date=tomorrow)
+        logger.info(
+            "Slot generation complete: %d new slots for garage_id=%s on %s",
+            created,
+            garage_id,
+            tomorrow,
+        )
+    except Exception:
+        logger.exception("Unhandled error in slot generation job.")
+    finally:
+        db.close()
+
+
 def start_scheduler(garage_id: int) -> BackgroundScheduler:
     """Create, configure, and start the background reminder scheduler.
 
     Returns the scheduler instance so the caller can shut it down if needed.
     """
     scheduler = BackgroundScheduler(daemon=True)
+
+    # Slot generation at 08:00 — before the 09:00 reminder job
+    scheduler.add_job(
+        _generate_tomorrow_slots,
+        trigger="cron",
+        hour=8,
+        minute=0,
+        id="daily_slot_generation",
+        name="Generate time slots for next day",
+        replace_existing=True,
+        kwargs={"garage_id": garage_id},
+    )
 
     scheduler.add_job(
         _send_daily_reminders,
@@ -178,7 +214,7 @@ def start_scheduler(garage_id: int) -> BackgroundScheduler:
 
     scheduler.start()
     logger.info(
-        "Reminder scheduler started for garage_id=%s (daily job at 09:00 AM).",
+        "Reminder scheduler started for garage_id=%s (slot gen at 08:00, reminders at 09:00).",
         garage_id,
     )
     return scheduler

@@ -252,6 +252,11 @@ class Booking(Base):
         server_default=text("0"),
     )
 
+    bay_id: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+
     reminder_sent_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
@@ -450,4 +455,58 @@ class AIConversation(Base):
         DateTime(timezone=True),
         server_default=func.now(),
         onupdate=func.now(),
+    )
+
+
+class ServiceBay(Base):
+    """Represents a service bay within a garage."""
+
+    __tablename__ = "service_bays"
+
+    id: Mapped[int] = mapped_column(primary_key=True, index=True)
+    garage_id: Mapped[int] = mapped_column(
+        ForeignKey("garages.id"),
+        nullable=False,
+        index=True,
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    is_active: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+        server_default=text("1"),
+    )
+
+
+class TimeSlot(Base):
+    """Represents a bookable 30-minute time slot for a specific bay."""
+
+    __tablename__ = "time_slots"
+    __table_args__ = (
+        UniqueConstraint(
+            "garage_id", "bay_id", "service_date", "service_time",
+            name="uq_timeslot_bay_date_time",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, index=True)
+    garage_id: Mapped[int] = mapped_column(
+        ForeignKey("garages.id"),
+        nullable=False,
+        index=True,
+    )
+    bay_id: Mapped[int] = mapped_column(
+        ForeignKey("service_bays.id"),
+        nullable=False,
+        index=True,
+    )
+
+    service_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    service_time: Mapped[str] = mapped_column(String(5), nullable=False, index=True)
+
+    is_booked: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=text("0"),
     )

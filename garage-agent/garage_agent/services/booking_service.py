@@ -6,8 +6,13 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from garage_agent.db.models import Booking, Customer, Vehicle
+from garage_agent.db.models import Booking, Customer, ServiceBay, Vehicle
 from garage_agent.services.audit_service import create_audit_log
+from garage_agent.services.slot_service import (
+    get_available_slot,
+    get_nearby_available_slots,
+    reserve_slot,
+)
 from garage_agent.intelligence.customer_health import update_customer_health
 from garage_agent.intelligence.service_prediction import calculate_next_service
 
@@ -118,6 +123,14 @@ def _get_booking_customer_id(booking: Booking) -> int:
     return booking.vehicle.customer_id
 
 
+def _format_time_label(t: str) -> str:
+    """Convert 'HH:MM' (24h) to human-readable '3:00 PM' style."""
+    h, m = int(t[:2]), int(t[3:])
+    suffix = "AM" if h < 12 else "PM"
+    display_h = h % 12 or 12
+    return f"{display_h}:{m:02d} {suffix}"
+
+
 def create_booking(
     db: Session,
     garage_id: int,
@@ -138,6 +151,51 @@ def create_booking(
             message="Selected time slot is already booked."
         )
 
+    # --- Bay-slot availability (only when bays are configured) ---
+    time_label = service_time.strftime("%H:%M")
+    has_bays = db.scalar(
+        select(ServiceBay.id)
+        .where(ServiceBay.garage_id == garage_id)
+        .where(ServiceBay.is_active.is_(True))
+    ) is not None
+
+    assigned_bay_id: int | None = None
+
+    if has_bays:
+        slot = get_available_slot(
+            db=db,
+            garage_id=garage_id,
+            service_date=service_date,
+            service_time=time_label,
+        )
+        if slot is None:
+            alternatives = get_nearby_available_slots(
+                db=db,
+                garage_id=garage_id,
+                service_date=service_date,
+                service_time=time_label,
+            )
+            if alternatives:
+                alt_display = ", ".join(_format_time_label(t) for t in alternatives)
+                msg = (
+                    f"That time slot is full. "
+                    f"Available times are {alt_display}."
+                )
+            else:
+                msg = "Selected time is full and no other slots are available for this date."
+
+            logger.warning(
+                "Slot full for garage_id=%s date=%s time=%s",
+                garage_id,
+                service_date,
+                time_label,
+                extra={"event": "slot_full", "garage_id": garage_id},
+            )
+            raise DomainException(code=ErrorCode.SLOT_FULL, message=msg)
+
+        reserve_slot(db=db, slot=slot)
+        assigned_bay_id = slot.bay_id
+
     try:
         vehicle = _get_or_create_vehicle_for_customer(
             db=db,
@@ -151,6 +209,7 @@ def create_booking(
             service_date=service_date,
             service_time=service_time,
             status="PENDING",
+            bay_id=assigned_bay_id,
         )
 
         db.add(booking)
@@ -168,6 +227,7 @@ def create_booking(
                 "service_type": service_type,
                 "service_date": str(service_date),
                 "service_time": str(service_time),
+                "bay_id": assigned_bay_id,
             },
         )
 
@@ -176,6 +236,7 @@ def create_booking(
             extra={
                 "booking_id": booking.id,
                 "customer_id": customer_id,
+                "bay_id": assigned_bay_id,
             },
         )
 
