@@ -81,9 +81,9 @@ class TestDateDetection:
         ctx = extract_fields_from_message("Can I book on 2026-04-01 please?", {})
         assert ctx["service_date"] == "2026-04-01"
 
-    def test_no_date(self):
+    def test_natural_date_tomorrow(self):
         ctx = extract_fields_from_message("Tomorrow maybe", {})
-        assert "service_date" not in ctx
+        assert "service_date" in ctx  # natural parser resolves "tomorrow"
 
 
 # ---------------------------------------------------------------------------

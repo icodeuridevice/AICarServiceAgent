@@ -27,6 +27,7 @@ from garage_agent.ai.rule_engine import RuleEngine
 from garage_agent.ai.tools.registry import ToolRegistry
 from garage_agent.services import ai_memory_service
 from garage_agent.services import conversation_service
+from garage_agent.services.date_parser_service import parse_natural_datetime
 from garage_agent.services.booking_service import get_or_create_customer_by_phone
 
 logger = logging.getLogger(__name__)
@@ -108,17 +109,28 @@ def extract_fields_from_message(message: str, context: dict) -> dict:
             logger.info("event=context_field_extracted field=service_type value=%s", service_value)
             break
 
-    # --- Date (YYYY-MM-DD) ---
-    date_match = _DATE_RE.search(message)
-    if date_match:
-        context["service_date"] = date_match.group(1)
-        logger.info("event=context_field_extracted field=service_date value=%s", date_match.group(1))
+    # --- Natural language date/time (runs first) ---
+    nat_date, nat_time = parse_natural_datetime(message)
+    if nat_date:
+        context["service_date"] = str(nat_date)
+        logger.info("event=context_field_extracted field=service_date value=%s source=natural", nat_date)
+    if nat_time:
+        context["service_time"] = nat_time.strftime("%H:%M")
+        logger.info("event=context_field_extracted field=service_time value=%s source=natural", nat_time.strftime("%H:%M"))
 
-    # --- Time (HH:MM) ---
-    time_match = _TIME_RE.search(message)
-    if time_match:
-        context["service_time"] = time_match.group(1)
-        logger.info("event=context_field_extracted field=service_time value=%s", time_match.group(1))
+    # --- Date fallback: regex (YYYY-MM-DD) ---
+    if "service_date" not in context:
+        date_match = _DATE_RE.search(message)
+        if date_match:
+            context["service_date"] = date_match.group(1)
+            logger.info("event=context_field_extracted field=service_date value=%s source=regex", date_match.group(1))
+
+    # --- Time fallback: regex (HH:MM) ---
+    if "service_time" not in context:
+        time_match = _TIME_RE.search(message)
+        if time_match:
+            context["service_time"] = time_match.group(1)
+            logger.info("event=context_field_extracted field=service_time value=%s source=regex", time_match.group(1))
 
     return context
 
