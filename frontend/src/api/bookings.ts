@@ -1,3 +1,4 @@
+import axios from "axios";
 import api from "./client";
 import type { Booking } from "../types/booking";
 
@@ -42,6 +43,41 @@ export const fetchBookings = async (): Promise<Booking[]> => {
     return response.data.data.map(normalizeBooking);
 };
 
+export const getBookingApiErrorMessage = (
+    err: unknown,
+    fallbackMessage: string
+): string => {
+    if (!axios.isAxiosError(err)) {
+        if (err instanceof Error && err.message) {
+            return err.message;
+        }
+        return fallbackMessage;
+    }
+
+    const domainMessage = err.response?.data?.error?.message as unknown;
+    if (typeof domainMessage === "string" && domainMessage.trim()) {
+        return domainMessage;
+    }
+
+    const detail = err.response?.data?.detail as unknown;
+    if (typeof detail === "string" && detail.trim()) {
+        return detail;
+    }
+
+    if (Array.isArray(detail) && detail.length > 0) {
+        const first = detail[0] as { msg?: unknown } | undefined;
+        if (first && typeof first.msg === "string" && first.msg.trim()) {
+            return first.msg;
+        }
+    }
+
+    if (typeof err.message === "string" && err.message.trim()) {
+        return err.message;
+    }
+
+    return fallbackMessage;
+};
+
 export const rescheduleBooking = async (
     bookingId: number,
     newDate: string
@@ -50,4 +86,8 @@ export const rescheduleBooking = async (
         booking_id: bookingId,
         service_date: newDate,
     });
+};
+
+export const cancelBooking = async (bookingId: number): Promise<void> => {
+    await api.patch(`/bookings/${bookingId}/cancel`);
 };
