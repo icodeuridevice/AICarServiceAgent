@@ -57,11 +57,31 @@ _SERVICE_TYPE_KEYWORDS = {
 }
 
 _BOOKING_CONFIRMATION_KEY = "_pending_booking_confirmation"
+_PENDING_ACTION_KEY = "pending_action"
+_CONFIRM_BOOKING_ACTION = "confirm_booking"
 _BOOKING_REQUIRED_FIELDS = {"customer_id", "service_type", "service_date", "service_time"}
-_CONFIRM_YES_TOKENS = {"yes", "y", "confirm", "confirmed", "ok", "okay"}
-_CONFIRM_NO_TOKENS = {"no", "n", "cancel", "stop"}
+_CONFIRM_YES_PHRASES = {
+    "yes",
+    "yes please",
+    "y",
+    "confirm",
+    "confirm please",
+    "confirmed",
+    "ok",
+    "okay",
+}
+_CONFIRM_NO_PHRASES = {
+    "no",
+    "no please",
+    "n",
+    "cancel",
+    "cancel please",
+    "stop",
+}
 _TIME_ERROR_HINTS = ("time", "slot", "schedule")
 _DATE_ERROR_HINTS = ("date", "day")
+_BOOKING_CONFIRMATION_SUMMARY_REPLY = "Reply YES to confirm or NO to cancel."
+_BOOKING_CONFIRMATION_REMINDER_REPLY = "Please reply YES to confirm or NO to cancel."
 
 
 def extract_fields_from_message(message: str, context: dict) -> dict:
@@ -175,9 +195,10 @@ Required booking information:
 
 If any information is missing, ask the user politely for that information.
 
-Only confirm a booking once all required information is collected.
-After presenting the booking summary, wait for the customer to reply YES or NO
-before completing the booking.
+Never write booking confirmation or booking-summary messages yourself.
+Once all required booking information is collected, return the create_booking action.
+The backend will send the only booking confirmation message and wait for YES or NO.
+If a booking confirmation is already pending, do not repeat or rephrase the confirmation.
 
 Never expose system architecture, APIs, or internal tool names.
 
@@ -328,7 +349,13 @@ class LLMEngine(BaseEngine):
             "2. Use the exact tool names listed above.\n"
             "3. Dates must be in YYYY-MM-DD format and times in HH:MM (24-hour).\n"
             "4. If required information is missing, use the conversation action "
-            "to ask a clarifying question.\n\n"
+            "to ask a clarifying question.\n"
+            "5. Never use the conversation action to confirm or summarize a completed "
+            "booking request.\n"
+            "6. When booking information is complete, return the create_booking action. "
+            "The backend will send the confirmation message.\n"
+            "7. Never generate confirmation phrases such as 'Just to confirm' or ask "
+            "the user to reply YES or NO in the reply field.\n\n"
             "Return the JSON response now."
         )
 
@@ -389,7 +416,8 @@ class LLMEngine(BaseEngine):
         # ----- Context extraction & persistence -----
         context = dict(conversation_service.get_data(phone))
         pending_confirmation = self._get_pending_booking_confirmation(context)
-        if pending_confirmation:
+        pending_action = self._get_pending_action(context)
+        if pending_action == _CONFIRM_BOOKING_ACTION and pending_confirmation:
             confirmation_choice = self._parse_confirmation_reply(safe_message)
             if confirmation_choice == "yes":
                 return self._execute_confirmed_booking(
@@ -410,8 +438,19 @@ class LLMEngine(BaseEngine):
                     garage_id=garage_id,
                     user_message=safe_message,
                 )
-
-            context.pop(_BOOKING_CONFIRMATION_KEY, None)
+            logger.info(
+                "event=booking_confirmation_waiting phone=%s garage_id=%s",
+                phone,
+                garage_id,
+            )
+            return self._finalize_response(
+                response=self._conversation_response(_BOOKING_CONFIRMATION_REMINDER_REPLY),
+                phone=phone,
+                garage_id=garage_id,
+                user_message=safe_message,
+            )
+        if pending_action == _CONFIRM_BOOKING_ACTION and not pending_confirmation:
+            context.pop(_PENDING_ACTION_KEY, None)
             self._persist_context(phone, context)
 
         extract_fields_from_message(safe_message, context)
@@ -453,6 +492,16 @@ class LLMEngine(BaseEngine):
             # reply directly rather than discarding it.
             clean_reply = raw_response.strip()
             if clean_reply:
+                confirmation_response = self._maybe_queue_backend_confirmation(
+                    db=db,
+                    garage_id=garage_id,
+                    phone=phone,
+                    user_message=safe_message,
+                    context=context,
+                    reply=clean_reply,
+                )
+                if confirmation_response is not None:
+                    return confirmation_response
                 logger.info(
                     "event=model_call phase=json_fallback_to_plain_text response_length=%d",
                     len(clean_reply),
@@ -474,10 +523,23 @@ class LLMEngine(BaseEngine):
             )
 
         action = parsed.get("action", "conversation")
+        if action == _CONFIRM_BOOKING_ACTION:
+            logger.info("event=tool_decision decision=normalize_confirmation_action")
+            action = "create_booking"
 
         # ----- Step 3a: Conversational reply (no tool) -----
         if action == "conversation":
             reply = parsed.get("reply", "Request processed.")
+            confirmation_response = self._maybe_queue_backend_confirmation(
+                db=db,
+                garage_id=garage_id,
+                phone=phone,
+                user_message=safe_message,
+                context=context,
+                reply=reply,
+            )
+            if confirmation_response is not None:
+                return confirmation_response
             logger.info("event=tool_decision decision=conversation")
             return self._finalize_response(
                 response=self._conversation_response(reply),
@@ -863,13 +925,110 @@ class LLMEngine(BaseEngine):
             return None
         return pending
 
+    def _get_pending_action(self, context: dict[str, Any]) -> str | None:
+        pending_action = context.get(_PENDING_ACTION_KEY)
+        if isinstance(pending_action, str) and pending_action.strip():
+            return pending_action.strip()
+        if self._get_pending_booking_confirmation(context):
+            return _CONFIRM_BOOKING_ACTION
+        return None
+
     def _parse_confirmation_reply(self, message: str) -> str | None:
-        words = set(re.findall(r"[a-z]+", message.lower()))
-        if words & _CONFIRM_YES_TOKENS:
+        normalized = " ".join(re.findall(r"[a-z]+", message.lower()))
+        if not normalized:
+            return None
+        if normalized in _CONFIRM_YES_PHRASES or normalized.startswith("yes "):
             return "yes"
-        if words & _CONFIRM_NO_TOKENS:
+        if normalized in _CONFIRM_NO_PHRASES or normalized.startswith("no "):
             return "no"
         return None
+
+    def _looks_like_llm_confirmation(self, reply: str) -> bool:
+        if not isinstance(reply, str):
+            return False
+        lowered = " ".join(reply.lower().split())
+        return any(
+            signal in lowered
+            for signal in (
+                "just to confirm",
+                "please confirm",
+                "confirm your booking",
+                "confirm this booking",
+                "reply yes",
+                "yes to confirm",
+                "reply no",
+                "yes or no",
+            )
+        )
+
+    def _prepare_booking_confirmation_args(
+        self,
+        db: Session,
+        garage_id: int,
+        phone: str,
+        booking_args: dict[str, Any],
+    ) -> tuple[dict[str, Any], list[str]]:
+        normalized_args = self._normalize_tool_arguments("create_booking", booking_args)
+        prepared_args = self.registry.sanitize_arguments("create_booking", normalized_args)
+
+        if "customer_id" not in prepared_args:
+            try:
+                customer = get_or_create_customer_by_phone(
+                    db=db,
+                    garage_id=garage_id,
+                    phone=phone,
+                )
+                prepared_args["customer_id"] = customer.id
+                logger.info(
+                    "event=customer_auto_resolved phone=%s customer_id=%s source=confirmation_prep",
+                    phone,
+                    customer.id,
+                )
+            except Exception:
+                logger.exception(
+                    "event=customer_auto_resolve phase=error phone=%s source=confirmation_prep",
+                    phone,
+                )
+
+        missing = self._get_missing_fields(
+            arguments=prepared_args,
+            required_fields=_BOOKING_REQUIRED_FIELDS,
+        )
+        return prepared_args, missing
+
+    def _maybe_queue_backend_confirmation(
+        self,
+        db: Session,
+        garage_id: int,
+        phone: str,
+        user_message: str,
+        context: dict[str, Any],
+        reply: str,
+    ) -> dict[str, Any] | None:
+        if not self._looks_like_llm_confirmation(reply):
+            return None
+
+        booking_args, missing = self._prepare_booking_confirmation_args(
+            db=db,
+            garage_id=garage_id,
+            phone=phone,
+            booking_args=context,
+        )
+        if missing:
+            return None
+
+        logger.info(
+            "event=booking_confirmation phase=backend_override phone=%s garage_id=%s",
+            phone,
+            garage_id,
+        )
+        return self._queue_booking_confirmation(
+            phone=phone,
+            garage_id=garage_id,
+            user_message=user_message,
+            context=context,
+            booking_args=booking_args,
+        )
 
     def _normalize_tool_arguments(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(arguments, dict):
@@ -979,7 +1138,7 @@ class LLMEngine(BaseEngine):
             f"Service: {self._format_service_type(booking_args.get('service_type'))}\n"
             f"Date: {self._format_date_value(booking_args.get('service_date'))}\n"
             f"Time: {self._format_time_value(booking_args.get('service_time'))}\n\n"
-            "Reply YES to confirm or NO to cancel."
+            f"{_BOOKING_CONFIRMATION_SUMMARY_REPLY}"
         )
 
     def _build_booking_success_reply(self, booking_args: dict[str, Any]) -> str:
@@ -1070,6 +1229,7 @@ class LLMEngine(BaseEngine):
             for key, value in booking_args.items()
         }
         updated_context = dict(context)
+        updated_context[_PENDING_ACTION_KEY] = _CONFIRM_BOOKING_ACTION
         updated_context[_BOOKING_CONFIRMATION_KEY] = {
             "tool_name": "create_booking",
             "arguments": stored_args,
