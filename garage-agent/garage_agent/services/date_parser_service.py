@@ -88,6 +88,10 @@ _TIME_PATTERNS = (
 )
 
 
+def _utc_today() -> date:
+    return datetime.utcnow().date()
+
+
 def _contains_explicit_date(text: str) -> bool:
     lowered = text.lower()
     if any(keyword in lowered for keyword in _DATE_KEYWORDS):
@@ -104,13 +108,21 @@ def _contains_explicit_time(text: str) -> bool:
 
 def _extract_date(text: str) -> date | None:
     lowered = text.lower()
-    today = date.today()
+    normalized = lowered.strip()
+    today = _utc_today()
 
-    if "day after tomorrow" in lowered:
+    if normalized == "day after tomorrow":
         return today + timedelta(days=2)
-    if "tomorrow" in lowered:
+    if normalized == "tomorrow":
         return today + timedelta(days=1)
-    if "today" in lowered:
+    if normalized == "today":
+        return today
+
+    if re.search(r"\bday after tomorrow\b", lowered):
+        return today + timedelta(days=2)
+    if re.search(r"\btomorrow\b", lowered):
+        return today + timedelta(days=1)
+    if re.search(r"\btoday\b", lowered):
         return today
 
     for pattern in _DATE_PATTERNS:
@@ -188,17 +200,6 @@ def _extract_time(text: str) -> time | None:
 def parse_natural_datetime(text: str) -> tuple:
     """Convert natural language into ``(date, time)`` or ``(None, None)``.
 
-    Examples::
-
-        >>> parse_natural_datetime("tomorrow")
-        (datetime.date(2026, 3, 27), None)
-
-        >>> parse_natural_datetime("today 4pm")
-        (datetime.date(2026, 3, 26), datetime.time(16, 0))
-
-        >>> parse_natural_datetime("next monday 10am")
-        (datetime.date(2026, 3, 30), datetime.time(10, 0))
-
     When the input contains only a date phrase (e.g. "tomorrow") without
     an explicit time component, the function returns ``None`` for the time
     so the caller can ask the user for a time preference.
@@ -217,6 +218,9 @@ def parse_natural_datetime(text: str) -> tuple:
 
     if parsed_date is None and parsed_time is None:
         return None, None
+
+    if parsed_date is not None:
+        logger.info("event=date_parsed value=%s", parsed_date.isoformat())
 
     logger.info(
         "event=natural_date_parsed input=%r date=%s time=%s",

@@ -76,20 +76,25 @@ def _parse_service_date(raw_date: str | None) -> date | None:
     if not normalized:
         return None
 
-    today = date.today()
+    today = datetime.utcnow().date()
+    parsed_date: date | None = None
 
     if normalized == "today":
-        return today
-    if normalized == "tomorrow":
-        return today + timedelta(days=1)
+        parsed_date = today
+    elif normalized == "tomorrow":
+        parsed_date = today + timedelta(days=1)
+    else:
+        for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"):
+            try:
+                parsed_date = datetime.strptime(normalized, fmt).date()
+                break
+            except ValueError:
+                continue
 
-    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"):
-        try:
-            return datetime.strptime(normalized, fmt).date()
-        except ValueError:
-            continue
+    if parsed_date is not None:
+        logger.info("event=date_parsed value=%s", parsed_date.isoformat())
 
-    return None
+    return parsed_date
 
 
 def _parse_service_time(raw_time: str | None) -> time | None:

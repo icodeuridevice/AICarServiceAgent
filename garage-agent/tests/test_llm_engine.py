@@ -1,6 +1,6 @@
 """Focused tests for the LLM booking confirmation flow."""
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -8,6 +8,10 @@ import pytest
 
 import garage_agent.ai.llm_engine as llm_engine_module
 from garage_agent.services import conversation_service
+
+
+def _utc_today() -> date:
+    return datetime.utcnow().date()
 
 
 class StubProvider:
@@ -82,7 +86,7 @@ def test_create_booking_returns_confirmation_before_execution(monkeypatch):
         message="Book routine service tomorrow at 5pm",
     )
 
-    expected_date = (date.today() + timedelta(days=1)).isoformat()
+    expected_date = (_utc_today() + timedelta(days=1)).isoformat()
     assert response["type"] == "conversation"
     assert response["reply"] == (
         "Please confirm your booking:\n"
@@ -121,7 +125,7 @@ def test_llm_confirmation_reply_is_replaced_by_backend_confirmation(monkeypatch)
         message="Book routine service tomorrow at 5pm",
     )
 
-    expected_date = (date.today() + timedelta(days=1)).isoformat()
+    expected_date = (_utc_today() + timedelta(days=1)).isoformat()
     assert response["type"] == "conversation"
     assert response["reply"] == (
         "Please confirm your booking:\n"
