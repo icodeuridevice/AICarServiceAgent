@@ -420,6 +420,43 @@ class Reminder(Base):
     )
 
 
+class BookingReminder(Base):
+    """Tracks proactive booking reminders (24h / 2h before appointment)."""
+
+    __tablename__ = "booking_reminders"
+
+    id: Mapped[int] = mapped_column(primary_key=True, index=True)
+    garage_id: Mapped[int] = mapped_column(
+        ForeignKey("garages.id"),
+        nullable=False,
+        index=True,
+    )
+    booking_id: Mapped[int] = mapped_column(
+        ForeignKey("bookings.id"),
+        nullable=False,
+        index=True,
+    )
+
+    reminder_type: Mapped[str] = mapped_column(
+        String(8), nullable=False
+    )  # "24h" | "2h"
+    scheduled_time: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    is_sent: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=text("0"),
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+
 class AuditLog(Base):
     """Enterprise audit trail for critical operations."""
 

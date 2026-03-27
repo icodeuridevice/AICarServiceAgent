@@ -9,6 +9,10 @@ from sqlalchemy.orm import Session
 from garage_agent.db.models import Booking, Customer, ServiceBay, Vehicle
 from garage_agent.services.vehicle_service import get_or_create_vehicle
 from garage_agent.services.audit_service import create_audit_log
+from garage_agent.services.booking_reminder_service import (
+    cancel_booking_reminders,
+    schedule_booking_reminders,
+)
 from garage_agent.services.slot_service import (
     get_available_slot,
     get_nearby_available_slots,
@@ -258,6 +262,9 @@ def create_booking(
         db.commit()
         db.refresh(booking)
 
+        # Schedule proactive reminders (24h + 2h before appointment)
+        schedule_booking_reminders(db, booking)
+
         create_audit_log(
             db=db,
             garage_id=garage_id,
@@ -407,6 +414,9 @@ def cancel_booking(db: Session, garage_id: int, booking_id: int) -> Booking:
 
     try:
         booking.status = "CANCELLED"
+
+        # Cancel any pending booking reminders
+        cancel_booking_reminders(db, booking.id)
 
         # Optional: clear reminder fields
         booking.reminder_sent = False

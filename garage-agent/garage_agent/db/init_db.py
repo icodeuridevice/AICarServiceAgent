@@ -285,6 +285,18 @@ def init_db() -> None:
             columns=["email"],
             where_clause="email IS NOT NULL AND TRIM(email) <> ''",
         )
+
+        # BookingReminder table migration (Proactive Reminder Engine)
+        _ensure_column(
+            table_name="booking_reminders",
+            column_name="is_sent",
+            column_ddl="is_sent BOOLEAN NOT NULL DEFAULT 0",
+        )
+        _ensure_column(
+            table_name="booking_reminders",
+            column_name="created_at",
+            column_ddl="created_at DATETIME",
+        )
     except SQLAlchemyError:
         logger.exception("Database initialization failed.")
         raise

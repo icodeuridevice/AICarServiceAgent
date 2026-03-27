@@ -11,7 +11,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from sqlalchemy import select
 from sqlalchemy.orm import joinedload
 
-from garage_agent.db.models import Booking, Garage, Reminder, Vehicle, Customer
+from garage_agent.db.models import Booking, BookingReminder, Garage, Reminder, Vehicle, Customer
 from garage_agent.db.session import SessionLocal
 from garage_agent.services.predictive_reminder_service import (
     get_due_vehicles,
@@ -159,6 +159,115 @@ def _send_daily_reminders(garage_id: int) -> None:
         db.close()
 
 
+def _build_booking_reminder_message(reminder, booking, vehicle) -> str:
+    """Build a human-friendly WhatsApp reminder message."""
+    brand = vehicle.brand or "your vehicle"
+    model = vehicle.vehicle_model or ""
+    vehicle_label = f"{brand} {model}".strip()
+
+    if reminder.reminder_type == "24h":
+        return (
+            f"Reminder \U0001F697\n\n"
+            f"Your {vehicle_label} service is scheduled tomorrow.\n\n"
+            f"\U0001F4C5 {booking.service_date}\n"
+            f"\u23F0 {booking.service_time.strftime('%I:%M %p')}"
+        )
+
+    # 2h reminder
+    return (
+        f"Reminder \u23F0\n\n"
+        f"Your service is in 2 hours.\n\n"
+        f"Vehicle: {vehicle_label}"
+    )
+
+
+def _process_booking_reminders(garage_id: int) -> None:
+    """Send pending 24h / 2h booking reminders."""
+    now = datetime.now(timezone.utc)
+    logger.info(
+        "Running booking reminder processor (garage_id=%s)",
+        garage_id,
+    )
+
+    db = SessionLocal()
+    try:
+        reminders = db.scalars(
+            select(BookingReminder)
+            .where(BookingReminder.garage_id == garage_id)
+            .where(BookingReminder.is_sent.is_(False))
+            .where(BookingReminder.scheduled_time <= now)
+        ).all()
+
+        sent, skipped, failed = 0, 0, 0
+
+        for reminder in reminders:
+            booking = db.get(Booking, reminder.booking_id)
+            if booking is None or booking.status == "CANCELLED":
+                reminder.is_sent = True
+                skipped += 1
+                logger.info(
+                    "event=reminder_skipped reason=cancelled_or_missing "
+                    "booking_id=%s type=%s",
+                    reminder.booking_id,
+                    reminder.reminder_type,
+                )
+                continue
+
+            vehicle = db.get(Vehicle, booking.vehicle_id)
+            if vehicle is None:
+                skipped += 1
+                logger.warning(
+                    "event=reminder_skipped reason=no_vehicle booking_id=%s",
+                    reminder.booking_id,
+                )
+                continue
+
+            customer: Customer | None = vehicle.customer
+            if customer is None or not customer.phone:
+                skipped += 1
+                logger.warning(
+                    "event=reminder_skipped reason=no_customer_phone "
+                    "booking_id=%s",
+                    reminder.booking_id,
+                )
+                continue
+
+            message = _build_booking_reminder_message(reminder, booking, vehicle)
+
+            try:
+                send_whatsapp_message(to=customer.phone, body=message)
+                reminder.is_sent = True
+                sent += 1
+                logger.info(
+                    "event=reminder_sent booking_id=%s type=%s phone=%s",
+                    reminder.booking_id,
+                    reminder.reminder_type,
+                    customer.phone,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to send booking reminder for booking %d",
+                    reminder.booking_id,
+                )
+                failed += 1
+
+        db.commit()
+
+        logger.info(
+            "Booking reminder processor done for garage_id=%s: "
+            "sent=%d skipped=%d failed=%d total=%d",
+            garage_id,
+            sent,
+            skipped,
+            failed,
+            len(reminders),
+        )
+    except Exception:
+        logger.exception("Unhandled error in booking reminder processor.")
+    finally:
+        db.close()
+
+
 def _generate_tomorrow_slots(garage_id: int) -> None:
     """Auto-generate time slots for the next day."""
     tomorrow = date.today() + timedelta(days=1)
@@ -213,8 +322,21 @@ def start_scheduler(garage_id: int) -> BackgroundScheduler:
     )
 
     scheduler.start()
+
+    # Booking-reminder processor — runs every 5 minutes
+    scheduler.add_job(
+        _process_booking_reminders,
+        trigger="interval",
+        minutes=5,
+        id="booking_reminder_processor",
+        name="Process 24h / 2h booking reminders",
+        replace_existing=True,
+        kwargs={"garage_id": garage_id},
+    )
+
     logger.info(
-        "Reminder scheduler started for garage_id=%s (slot gen at 08:00, reminders at 09:00).",
+        "Reminder scheduler started for garage_id=%s "
+        "(slot gen at 08:00, reminders at 09:00, booking reminders every 5m).",
         garage_id,
     )
     return scheduler
