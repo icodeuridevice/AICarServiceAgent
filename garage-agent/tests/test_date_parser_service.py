@@ -32,7 +32,17 @@ class TestParseNaturalDatetime:
         parsed_date, parsed_time = parse_natural_datetime("day after tomorrow evening")
         expected_date = date.today() + timedelta(days=2)
         assert parsed_date == expected_date
-        assert parsed_time is not None  # "evening" is a time indicator
+        assert parsed_time == time(18, 0)
+
+    def test_5pm_returns_time_only(self):
+        parsed_date, parsed_time = parse_natural_datetime("5pm")
+        assert parsed_date is None
+        assert parsed_time == time(17, 0)
+
+    def test_evening_returns_time_only(self):
+        parsed_date, parsed_time = parse_natural_datetime("evening")
+        assert parsed_date is None
+        assert parsed_time == time(18, 0)
 
     def test_gibberish_returns_none(self):
         parsed_date, parsed_time = parse_natural_datetime("asdf jkl random gibberish")

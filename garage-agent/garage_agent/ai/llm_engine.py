@@ -56,6 +56,13 @@ _SERVICE_TYPE_KEYWORDS = {
     "battery": "battery_service",
 }
 
+_BOOKING_CONFIRMATION_KEY = "_pending_booking_confirmation"
+_BOOKING_REQUIRED_FIELDS = {"customer_id", "service_type", "service_date", "service_time"}
+_CONFIRM_YES_TOKENS = {"yes", "y", "confirm", "confirmed", "ok", "okay"}
+_CONFIRM_NO_TOKENS = {"no", "n", "cancel", "stop"}
+_TIME_ERROR_HINTS = ("time", "slot", "schedule")
+_DATE_ERROR_HINTS = ("date", "day")
+
 
 def extract_fields_from_message(message: str, context: dict) -> dict:
     """Scan *message* for booking-related fields and merge into *context*.
@@ -169,6 +176,8 @@ Required booking information:
 If any information is missing, ask the user politely for that information.
 
 Only confirm a booking once all required information is collected.
+After presenting the booking summary, wait for the customer to reply YES or NO
+before completing the booking.
 
 Never expose system architecture, APIs, or internal tool names.
 
@@ -203,7 +212,9 @@ class LLMEngine(BaseEngine):
             "Write a concise, customer-friendly WhatsApp reply using the tool result. "
             "Do not mention internal implementation details."
         )
-        self.tool_execution_failure_reply = "I couldn't complete that request. Please try again."
+        self.tool_execution_failure_reply = (
+            "I'm having trouble completing that right now. Let me help you step by step."
+        )
 
         logger.info(
             "event=llm_engine_init provider=%s model=%s",
@@ -376,10 +387,35 @@ class LLMEngine(BaseEngine):
             return self._conversation_response("Please provide more details so I can assist you.")
 
         # ----- Context extraction & persistence -----
-        context = conversation_service.get_data(phone)
+        context = dict(conversation_service.get_data(phone))
+        pending_confirmation = self._get_pending_booking_confirmation(context)
+        if pending_confirmation:
+            confirmation_choice = self._parse_confirmation_reply(safe_message)
+            if confirmation_choice == "yes":
+                return self._execute_confirmed_booking(
+                    db=db,
+                    garage_id=garage_id,
+                    phone=phone,
+                    user_message=safe_message,
+                    pending_confirmation=pending_confirmation,
+                )
+            if confirmation_choice == "no":
+                conversation_service.clear_state(phone)
+                return self._finalize_response(
+                    response=self._conversation_response(
+                        "Okay, I have cancelled this booking request. "
+                        "If you want to start again, share the service, date, and time."
+                    ),
+                    phone=phone,
+                    garage_id=garage_id,
+                    user_message=safe_message,
+                )
+
+            context.pop(_BOOKING_CONFIRMATION_KEY, None)
+            self._persist_context(phone, context)
+
         extract_fields_from_message(safe_message, context)
-        for key, value in context.items():
-            conversation_service.update_data(phone, key, value)
+        self._persist_context(phone, context)
         logger.info(
             "event=context_state phone=%s context_keys=%s",
             phone,
@@ -464,7 +500,10 @@ class LLMEngine(BaseEngine):
             )
 
         # Extract arguments (everything except "action")
-        raw_arguments = {k: v for k, v in parsed.items() if k != "action"}
+        raw_arguments = self._normalize_tool_arguments(
+            tool_name=tool_name,
+            arguments={k: v for k, v in parsed.items() if k != "action"},
+        )
 
         try:
             parsed_arguments = self._parse_tool_arguments(raw_arguments)
@@ -488,6 +527,7 @@ class LLMEngine(BaseEngine):
 
         # ----- Step 4: Merge conversation context into arguments -----
         merged_args = {**context, **arguments}  # LLM args take priority
+        merged_args = self._normalize_tool_arguments(tool_name=tool_name, arguments=merged_args)
         merged_args = self.registry.sanitize_arguments(tool_name, merged_args)
         logger.info(
             "event=context_argument_merge context_keys=%s llm_keys=%s final_keys=%s",
@@ -516,8 +556,10 @@ class LLMEngine(BaseEngine):
 
         # ----- Step 4b: Guard – check required fields for create_booking -----
         if tool_name == "create_booking":
-            required_fields = {"customer_id", "service_type", "service_date", "service_time"}
-            missing = sorted(required_fields - set(merged_args.keys()))
+            missing = self._get_missing_fields(
+                arguments=merged_args,
+                required_fields=_BOOKING_REQUIRED_FIELDS,
+            )
             if missing:
                 friendly = ", ".join(f.replace("_", " ") for f in missing)
                 reply = (
@@ -534,6 +576,14 @@ class LLMEngine(BaseEngine):
                     garage_id=garage_id,
                     user_message=safe_message,
                 )
+
+            return self._queue_booking_confirmation(
+                phone=phone,
+                garage_id=garage_id,
+                user_message=safe_message,
+                context=context,
+                booking_args=merged_args,
+            )
 
         # ----- Step 5: Execute the tool -----
         logger.info("event=tool_execution phase=start tool=%s", tool_name)
@@ -795,6 +845,356 @@ class LLMEngine(BaseEngine):
                 assistant_reply=reply,
             )
         return response
+
+    def _persist_context(self, phone: str, context: dict[str, Any]) -> None:
+        conversation_service.clear_state(phone)
+        for key, value in context.items():
+            conversation_service.update_data(phone, key, value)
+
+    def _get_pending_booking_confirmation(self, context: dict[str, Any]) -> dict[str, Any] | None:
+        pending = context.get(_BOOKING_CONFIRMATION_KEY)
+        if not isinstance(pending, dict):
+            return None
+        if pending.get("tool_name") != "create_booking":
+            return None
+
+        pending_args = pending.get("arguments")
+        if not isinstance(pending_args, dict):
+            return None
+        return pending
+
+    def _parse_confirmation_reply(self, message: str) -> str | None:
+        words = set(re.findall(r"[a-z]+", message.lower()))
+        if words & _CONFIRM_YES_TOKENS:
+            return "yes"
+        if words & _CONFIRM_NO_TOKENS:
+            return "no"
+        return None
+
+    def _normalize_tool_arguments(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(arguments, dict):
+            return {}
+
+        normalized = dict(arguments)
+        if tool_name == "create_booking":
+            date_key = "service_date"
+            time_key = "service_time"
+        elif tool_name == "reschedule_booking":
+            date_key = "new_date"
+            time_key = "new_time"
+        else:
+            return normalized
+
+        combined_parts = []
+        raw_date = normalized.get(date_key)
+        raw_time = normalized.get(time_key)
+
+        if isinstance(raw_date, str) and raw_date.strip():
+            combined_parts.append(raw_date.strip())
+        if isinstance(raw_time, str) and raw_time.strip():
+            combined_parts.append(raw_time.strip())
+
+        if combined_parts:
+            parsed_date, parsed_time = parse_natural_datetime(" ".join(combined_parts))
+            if parsed_date and isinstance(raw_date, str):
+                normalized[date_key] = parsed_date.isoformat()
+            if parsed_time and isinstance(raw_time, str):
+                normalized[time_key] = parsed_time.strftime("%H:%M")
+
+        if isinstance(normalized.get(date_key), str):
+            parsed_date, _ = parse_natural_datetime(normalized[date_key])
+            if parsed_date:
+                normalized[date_key] = parsed_date.isoformat()
+
+        if isinstance(normalized.get(time_key), str):
+            _, parsed_time = parse_natural_datetime(normalized[time_key])
+            if parsed_time:
+                normalized[time_key] = parsed_time.strftime("%H:%M")
+
+        return normalized
+
+    def _has_value(self, value: Any) -> bool:
+        if value is None:
+            return False
+        if isinstance(value, str):
+            return bool(value.strip())
+        if isinstance(value, dict):
+            return bool(value)
+        return True
+
+    def _get_missing_fields(
+        self,
+        arguments: dict[str, Any],
+        required_fields: set[str],
+    ) -> list[str]:
+        return sorted(
+            field for field in required_fields if not self._has_value(arguments.get(field))
+        )
+
+    def _serialize_booking_value(self, value: Any) -> Any:
+        if isinstance(value, datetime):
+            return value.date().isoformat()
+        if isinstance(value, date):
+            return value.isoformat()
+        if isinstance(value, time):
+            return value.strftime("%H:%M")
+        if isinstance(value, dict):
+            return {
+                str(key): self._serialize_booking_value(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, (list, tuple, set)):
+            return [self._serialize_booking_value(item) for item in value]
+        return value
+
+    def _format_service_type(self, value: Any) -> str:
+        if not self._has_value(value):
+            return "General Service"
+        return str(value).replace("_", " ").strip().title()
+
+    def _format_date_value(self, value: Any) -> str:
+        if isinstance(value, datetime):
+            return value.date().isoformat()
+        if isinstance(value, date):
+            return value.isoformat()
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        return "Unknown"
+
+    def _format_time_value(self, value: Any) -> str:
+        if isinstance(value, time):
+            return value.strftime("%H:%M")
+        if isinstance(value, datetime):
+            return value.strftime("%H:%M")
+        if isinstance(value, str) and value.strip():
+            clean_value = value.strip()
+            if len(clean_value) >= 5 and clean_value[2] == ":":
+                return clean_value[:5]
+            return clean_value
+        return "Unknown"
+
+    def _build_booking_confirmation_reply(self, booking_args: dict[str, Any]) -> str:
+        return (
+            "Please confirm your booking:\n"
+            f"Service: {self._format_service_type(booking_args.get('service_type'))}\n"
+            f"Date: {self._format_date_value(booking_args.get('service_date'))}\n"
+            f"Time: {self._format_time_value(booking_args.get('service_time'))}\n\n"
+            "Reply YES to confirm or NO to cancel."
+        )
+
+    def _build_booking_success_reply(self, booking_args: dict[str, Any]) -> str:
+        return (
+            f"Your booking is confirmed for "
+            f"{self._format_service_type(booking_args.get('service_type'))} "
+            f"on {self._format_date_value(booking_args.get('service_date'))} "
+            f"at {self._format_time_value(booking_args.get('service_time'))}."
+        )
+
+    def _build_booking_retry_context(
+        self,
+        booking_args: dict[str, Any],
+        error_message: str | None,
+    ) -> dict[str, Any]:
+        retry_context: dict[str, Any] = {}
+        for field in ("vehicle", "service_type", "service_date", "service_time"):
+            value = booking_args.get(field)
+            if self._has_value(value):
+                retry_context[field] = self._serialize_booking_value(value)
+
+        lowered_error = (error_message or "").lower()
+        if any(hint in lowered_error for hint in _TIME_ERROR_HINTS):
+            retry_context.pop("service_time", None)
+        elif any(hint in lowered_error for hint in _DATE_ERROR_HINTS):
+            retry_context.pop("service_date", None)
+        else:
+            retry_context.pop("service_date", None)
+            retry_context.pop("service_time", None)
+
+        return retry_context
+
+    def _build_booking_retry_reply(self, error_message: str | None) -> str:
+        lowered_error = (error_message or "").lower()
+        if any(hint in lowered_error for hint in _TIME_ERROR_HINTS):
+            return (
+                f"{self.tool_execution_failure_reply} "
+                "Please share another preferred time."
+            )
+        if any(hint in lowered_error for hint in _DATE_ERROR_HINTS):
+            return (
+                f"{self.tool_execution_failure_reply} "
+                "Please share your preferred date again."
+            )
+        return (
+            f"{self.tool_execution_failure_reply} "
+            "Please share your preferred date and time again."
+        )
+
+    def _handle_booking_retry(
+        self,
+        phone: str,
+        garage_id: int,
+        user_message: str,
+        booking_args: dict[str, Any],
+        error_message: str | None,
+    ) -> dict:
+        retry_context = self._build_booking_retry_context(
+            booking_args=booking_args,
+            error_message=error_message,
+        )
+        self._persist_context(phone, retry_context)
+        logger.info(
+            "event=booking_retry phone=%s garage_id=%s retry_keys=%s",
+            phone,
+            garage_id,
+            sorted(retry_context.keys()),
+        )
+        return self._finalize_response(
+            response=self._conversation_response(
+                self._build_booking_retry_reply(error_message),
+            ),
+            phone=phone,
+            garage_id=garage_id,
+            user_message=user_message,
+        )
+
+    def _queue_booking_confirmation(
+        self,
+        phone: str,
+        garage_id: int,
+        user_message: str,
+        context: dict[str, Any],
+        booking_args: dict[str, Any],
+    ) -> dict:
+        stored_args = {
+            key: self._serialize_booking_value(value)
+            for key, value in booking_args.items()
+        }
+        updated_context = dict(context)
+        updated_context[_BOOKING_CONFIRMATION_KEY] = {
+            "tool_name": "create_booking",
+            "arguments": stored_args,
+        }
+        self._persist_context(phone, updated_context)
+        logger.info(
+            "event=user_confirmation_pending phone=%s garage_id=%s service_type=%s service_date=%s service_time=%s",
+            phone,
+            garage_id,
+            stored_args.get("service_type"),
+            stored_args.get("service_date"),
+            stored_args.get("service_time"),
+        )
+        return self._finalize_response(
+            response=self._conversation_response(
+                self._build_booking_confirmation_reply(stored_args),
+            ),
+            phone=phone,
+            garage_id=garage_id,
+            user_message=user_message,
+        )
+
+    def _execute_confirmed_booking(
+        self,
+        db: Session,
+        garage_id: int,
+        phone: str,
+        user_message: str,
+        pending_confirmation: dict[str, Any],
+    ) -> dict:
+        raw_booking_args = pending_confirmation.get("arguments", {})
+        booking_args = self.registry.sanitize_arguments(
+            "create_booking",
+            self._normalize_tool_arguments("create_booking", raw_booking_args),
+        )
+        missing = self._get_missing_fields(
+            arguments=booking_args,
+            required_fields=_BOOKING_REQUIRED_FIELDS,
+        )
+        if missing:
+            return self._handle_booking_retry(
+                phone=phone,
+                garage_id=garage_id,
+                user_message=user_message,
+                booking_args=raw_booking_args,
+                error_message="missing required booking fields",
+            )
+
+        logger.info("event=tool_execution phase=start tool=create_booking source=confirmation")
+        try:
+            tool_execution = self.registry.execute(
+                tool_name="create_booking",
+                db=db,
+                garage_id=garage_id,
+                **booking_args,
+            )
+        except Exception:
+            logger.exception("event=tool_execution phase=error tool=create_booking source=confirmation")
+            return self._handle_booking_retry(
+                phone=phone,
+                garage_id=garage_id,
+                user_message=user_message,
+                booking_args=raw_booking_args,
+                error_message=None,
+            )
+
+        if not isinstance(tool_execution, dict):
+            logger.warning(
+                "event=tool_execution phase=invalid_response tool=create_booking response_type=%s",
+                type(tool_execution).__name__,
+            )
+            return self._handle_booking_retry(
+                phone=phone,
+                garage_id=garage_id,
+                user_message=user_message,
+                booking_args=raw_booking_args,
+                error_message=None,
+            )
+
+        execution_success = bool(tool_execution.get("success"))
+        logger.info(
+            "event=tool_execution phase=finish tool=create_booking success=%s source=confirmation",
+            execution_success,
+        )
+        if not execution_success:
+            logger.warning(
+                "event=tool_execution phase=failed tool=create_booking error=%s source=confirmation",
+                tool_execution.get("error"),
+            )
+            return self._handle_booking_retry(
+                phone=phone,
+                garage_id=garage_id,
+                user_message=user_message,
+                booking_args=raw_booking_args,
+                error_message=tool_execution.get("error"),
+            )
+
+        serialized_result = self._make_json_safe(tool_execution.get("data"))
+        conversation_service.clear_state(phone)
+        logger.info("event=context_cleared phone=%s reason=booking_success", phone)
+
+        booking_id = serialized_result.get("id") if isinstance(serialized_result, dict) else None
+        logger.info(
+            "event=booking_confirmed phone=%s garage_id=%s booking_id=%s service_type=%s service_date=%s service_time=%s",
+            phone,
+            garage_id,
+            booking_id,
+            self._serialize_booking_value(booking_args.get("service_type")),
+            self._serialize_booking_value(booking_args.get("service_date")),
+            self._serialize_booking_value(booking_args.get("service_time")),
+        )
+
+        return self._finalize_response(
+            response=self._response_contract(
+                engine="llm",
+                response_type="tool_call",
+                reply=self._build_booking_success_reply(booking_args),
+                tool="create_booking",
+                arguments=booking_args,
+                result=serialized_result,
+            ),
+            phone=phone,
+            garage_id=garage_id,
+            user_message=user_message,
+        )
 
     # ------------------------------------------------------------------
     # JSON extraction helpers

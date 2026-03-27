@@ -103,6 +103,16 @@ class TestTimeDetection:
         ctx = extract_fields_from_message("Any time works", {})
         assert "service_time" not in ctx
 
+    def test_5pm_sets_time_only(self):
+        ctx = extract_fields_from_message("5pm works for me", {})
+        assert ctx["service_time"] == "17:00"
+        assert "service_date" not in ctx
+
+    def test_evening_sets_normalized_time_only(self):
+        ctx = extract_fields_from_message("Evening is better", {})
+        assert ctx["service_time"] == "18:00"
+        assert "service_date" not in ctx
+
 
 # ---------------------------------------------------------------------------
 # Combined / multi-field & context mutation
