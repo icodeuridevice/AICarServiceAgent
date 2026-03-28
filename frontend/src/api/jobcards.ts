@@ -1,6 +1,7 @@
 import api from "./client";
 import axios from "axios";
 import type { JobCard } from "../types/jobcard";
+import { getBookingApiErrorMessage } from "./bookings";
 
 interface FetchActiveJobCardsResponse {
     data: RawJobCard[];
@@ -11,6 +12,7 @@ interface RawJobCard {
     booking_id?: number;
     technician_name?: string | null;
     status?: string;
+    started_at?: string | null;
     total_cost?: number | null;
     completed_at?: string | null;
 }
@@ -29,6 +31,7 @@ const normalizeJobCard = (raw: RawJobCard): JobCard => {
         booking_id: raw.booking_id,
         technician_name: raw.technician_name ?? null,
         status: raw.status ?? "IN_PROGRESS",
+        started_at: raw.started_at ?? null,
         total_cost: raw.total_cost ?? null,
         completed_at: raw.completed_at ?? null,
     };
@@ -39,16 +42,20 @@ export const fetchActiveJobCards = async (): Promise<JobCard[]> => {
     return response.data.data.map(normalizeJobCard);
 };
 
-export const createJobCard = async (
-    bookingId: number,
-    technicianName: string
-): Promise<void> => {
-    await api.post("/jobcards/", null, {
-        params: {
-            booking_id: bookingId,
-            technician_name: technicianName,
+export const createJobCard = async (bookingId: number): Promise<void> => {
+    await api.post(
+        "/jobcards/",
+        { booking_id: bookingId },
+        {
+            headers: {
+                "Content-Type": "application/json",
+            },
         },
-    });
+    );
+};
+
+export const startJobCard = async (jobcardId: number): Promise<void> => {
+    await api.patch(`/jobcards/${jobcardId}`, {});
 };
 
 export const completeJobCard = async (jobcardId: number): Promise<void> => {
@@ -66,3 +73,5 @@ export const hasJobCardForBooking = async (bookingId: number): Promise<boolean> 
         throw err;
     }
 };
+
+export const getJobCardApiErrorMessage = getBookingApiErrorMessage;

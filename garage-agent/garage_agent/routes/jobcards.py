@@ -1,6 +1,7 @@
 """JobCard API routes."""
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from garage_agent.db.models import User
@@ -18,18 +19,22 @@ from garage_agent.services.jobcard_service import (
 router = APIRouter(prefix="/jobcards", tags=["JobCards"])
 
 
+class CreateJobCardRequest(BaseModel):
+    booking_id: int
+    technician_name: str | None = None
+
+
 @router.post("/")
 def api_create_job_card(
-    booking_id: int,
-    technician_name: str | None = None,
+    payload: CreateJobCardRequest,
     current_user: User = Depends(require_staff),
     db: Session = Depends(get_db),
 ):
     try:
         job = create_job_card(
             db=db,
-            booking_id=booking_id,
-            technician_name=technician_name,
+            booking_id=payload.booking_id,
+            technician_name=payload.technician_name,
             garage_id=current_user.garage_id,
         )
         return success_response(data={"jobcard_id": job.id, "status": job.status})
@@ -113,5 +118,4 @@ def api_get_job_by_booking(
         "technician_name": job.technician_name,
         "total_cost": job.total_cost,
     })
-
 

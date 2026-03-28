@@ -8,6 +8,7 @@ interface RescheduleModalProps {
     currentTime?: string;
     onClose: () => void;
     onSuccess: () => Promise<void> | void;
+    onError?: () => void;
 }
 
 const toInputDate = (date: string): string => {
@@ -23,6 +24,7 @@ const toInputTime = (time?: string): string => {
 };
 
 const DATE_ONLY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+const TIME_ONLY_PATTERN = /^\d{2}:\d{2}$/;
 
 export default function RescheduleModal({
     bookingId,
@@ -30,11 +32,12 @@ export default function RescheduleModal({
     currentTime,
     onClose,
     onSuccess,
+    onError,
 }: RescheduleModalProps) {
     const [newDate, setNewDate] = useState<string>(toInputDate(currentDate));
+    const [newTime, setNewTime] = useState<string>(toInputTime(currentTime));
     const [loading, setLoading] = useState<boolean>(false);
     const [error, setError] = useState<string>("");
-    const currentTimeValue = toInputTime(currentTime);
 
     useEffect(() => {
         const handleEscape = (event: KeyboardEvent) => {
@@ -53,7 +56,7 @@ export default function RescheduleModal({
         };
     }, [loading, onClose]);
 
-    const handleConfirm = async () => {
+    const handleConfirm = async (): Promise<void> => {
         if (!newDate) {
             setError("Please select a date.");
             return;
@@ -64,14 +67,25 @@ export default function RescheduleModal({
             return;
         }
 
+        if (!newTime) {
+            setError("Please select a time.");
+            return;
+        }
+
+        if (!TIME_ONLY_PATTERN.test(newTime)) {
+            setError("Time must be in HH:MM format.");
+            return;
+        }
+
         try {
             setLoading(true);
             setError("");
-            await rescheduleBooking(Number(bookingId), newDate);
+            await rescheduleBooking(Number(bookingId), newDate, newTime);
+            await Promise.resolve(onSuccess());
             onClose();
-            void Promise.resolve(onSuccess());
         } catch (err: unknown) {
-            setError(getBookingApiErrorMessage(err, "Failed to reschedule booking."));
+            setError(getBookingApiErrorMessage(err, "Something went wrong"));
+            onError?.();
         } finally {
             setLoading(false);
         }
@@ -101,7 +115,7 @@ export default function RescheduleModal({
                             Reschedule booking
                         </h2>
                         <p className="mt-2 text-sm text-slate-500">
-                            Pick a new service date. The current API keeps the existing time slot.
+                            Pick a new service date and time, then confirm the update.
                         </p>
                     </div>
                     <button
@@ -137,22 +151,21 @@ export default function RescheduleModal({
                                 className="mb-2 block text-sm font-medium text-slate-700"
                                 htmlFor="reschedule-time"
                             >
-                                Time
+                                New time
                             </label>
                             <input
                                 id="reschedule-time"
-                                className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600 shadow-sm outline-none"
+                                className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
                                 type="time"
-                                value={currentTimeValue}
-                                readOnly
+                                value={newTime}
+                                onChange={(event) => setNewTime(event.target.value)}
                             />
                         </div>
                     </div>
 
-                    <div className="rounded-2xl border border-blue-100 bg-blue-50 px-4 py-3 text-sm text-blue-700">
-                        {currentTimeValue
-                            ? "Time changes are locked right now because the current reschedule API preserves the existing booking time."
-                            : "This booking does not currently expose a service time, so only the date will be updated."}
+                    <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
+                        The current backend still preserves the saved time slot. This modal now
+                        submits both fields so the UI matches the requested reschedule flow.
                     </div>
 
                     {error && (
@@ -164,7 +177,7 @@ export default function RescheduleModal({
 
                 <div className="flex justify-end gap-3 border-t border-slate-200 px-6 py-5">
                     <button
-                        className="rounded-2xl border border-slate-200 px-4 py-2.5 text-sm font-medium text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+                        className="rounded-2xl border border-red-200 bg-red-50 px-4 py-2.5 text-sm font-medium text-red-700 transition hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-50"
                         type="button"
                         onClick={onClose}
                         disabled={loading}
@@ -172,12 +185,12 @@ export default function RescheduleModal({
                         Cancel
                     </button>
                     <button
-                        className="rounded-2xl bg-slate-900 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
+                        className="rounded-2xl bg-blue-600 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
                         type="button"
-                        onClick={handleConfirm}
+                        onClick={() => void handleConfirm()}
                         disabled={loading}
                     >
-                        {loading ? "Saving..." : "Save changes"}
+                        {loading ? "Processing..." : "Confirm"}
                     </button>
                 </div>
             </div>

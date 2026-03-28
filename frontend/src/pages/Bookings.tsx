@@ -1,13 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
-import {
-    cancelBooking,
-    fetchBookings,
-    getBookingApiErrorMessage,
-} from "../api/bookings";
+import { cancelBooking, fetchBookings } from "../api/bookings";
 import type { Booking } from "../types/booking";
 import RescheduleModal from "../components/RescheduleModal";
 import ErrorBanner from "../components/ErrorBanner";
 import StatusBadge from "../components/StatusBadge";
+import Toast, { type ToastState } from "../components/Toast";
 
 const canManageBooking = (status: string): boolean => {
     return status === "PENDING" || status === "CONFIRMED";
@@ -50,14 +47,17 @@ export default function Bookings() {
     const [bookings, setBookings] = useState<Booking[]>([]);
     const [loading, setLoading] = useState<boolean>(true);
     const [error, setError] = useState<string>("");
-    const [operationError, setOperationError] = useState<string>("");
     const [selectedBookingForReschedule, setSelectedBookingForReschedule] = useState<Booking | null>(null);
     const [showModal, setShowModal] = useState<boolean>(false);
     const [cancellingBookingId, setCancellingBookingId] = useState<number | null>(null);
+    const [toast, setToast] = useState<ToastState | null>(null);
 
-    const loadBookings = useCallback(async (): Promise<void> => {
+    const loadBookings = useCallback(async (showLoader = true): Promise<void> => {
         try {
-            setLoading(true);
+            if (showLoader) {
+                setLoading(true);
+            }
+
             setError("");
             const data = await fetchBookings();
             setBookings(data);
@@ -68,7 +68,9 @@ export default function Bookings() {
                 setError("Failed to fetch bookings.");
             }
         } finally {
-            setLoading(false);
+            if (showLoader) {
+                setLoading(false);
+            }
         }
     }, []);
 
@@ -77,7 +79,10 @@ export default function Bookings() {
     }, [loadBookings]);
 
     const handleOpenReschedule = (booking: Booking): void => {
-        setOperationError("");
+        if (!canManageBooking(booking.status)) {
+            return;
+        }
+
         setSelectedBookingForReschedule(booking);
         setShowModal(true);
     };
@@ -102,11 +107,17 @@ export default function Bookings() {
 
         try {
             setCancellingBookingId(booking.id);
-            setOperationError("");
             await cancelBooking(booking.id);
-            await loadBookings();
-        } catch (err: unknown) {
-            setOperationError(getBookingApiErrorMessage(err, "Failed to cancel booking."));
+            await loadBookings(false);
+            setToast({
+                type: "success",
+                message: "Booking updated",
+            });
+        } catch {
+            setToast({
+                type: "error",
+                message: "Something went wrong",
+            });
         } finally {
             setCancellingBookingId(null);
         }
@@ -129,6 +140,8 @@ export default function Bookings() {
 
     return (
         <div className="space-y-6">
+            {toast && <Toast toast={toast} onClose={() => setToast(null)} />}
+
             <section className="rounded-3xl border border-slate-200 bg-gradient-to-br from-white via-slate-50 to-blue-50 px-6 py-6 shadow-sm">
                 <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
                     <div className="max-w-2xl">
@@ -168,12 +181,6 @@ export default function Bookings() {
                         {bookings.length} records
                     </div>
                 </div>
-
-                {operationError && (
-                    <div className="px-6 pt-6">
-                        <ErrorBanner message={operationError} />
-                    </div>
-                )}
 
                 {bookings.length === 0 ? (
                     <div className="px-6 py-16 text-center">
@@ -255,7 +262,7 @@ export default function Bookings() {
                                         <td className="px-4 py-5 align-top">
                                             <div className="flex justify-end gap-2">
                                                 <button
-                                                    className="inline-flex items-center justify-center rounded-2xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 shadow-sm transition hover:border-slate-300 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+                                                    className="inline-flex items-center justify-center rounded-2xl border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-semibold text-blue-700 transition hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-50"
                                                     type="button"
                                                     disabled={!canManageBooking(booking.status)}
                                                     title={
@@ -282,7 +289,7 @@ export default function Bookings() {
                                                     onClick={() => void handleCancelBooking(booking)}
                                                 >
                                                     {cancellingBookingId === booking.id
-                                                        ? "Cancelling..."
+                                                        ? "Processing..."
                                                         : "Cancel"}
                                                 </button>
                                             </div>
@@ -301,7 +308,19 @@ export default function Bookings() {
                     currentDate={selectedBookingForReschedule.service_date}
                     currentTime={selectedBookingForReschedule.service_time}
                     onClose={handleCloseReschedule}
-                    onSuccess={loadBookings}
+                    onSuccess={async () => {
+                        await loadBookings(false);
+                        setToast({
+                            type: "success",
+                            message: "Booking updated",
+                        });
+                    }}
+                    onError={() => {
+                        setToast({
+                            type: "error",
+                            message: "Something went wrong",
+                        });
+                    }}
                 />
             )}
         </div>

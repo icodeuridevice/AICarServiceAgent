@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, time
 
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
@@ -43,7 +43,8 @@ class StatusUpdate(BaseModel):
 
 class BookingRescheduleRequest(BaseModel):
     booking_id: int
-    service_date: date
+    new_date: date
+    new_time: time
 
 ALLOWED_STATUSES = ["PENDING", "CONFIRMED", "IN_PROGRESS", "COMPLETED", "CANCELLED"]
 
@@ -181,7 +182,7 @@ def update_status(
 )
 
 
-@router.put("/reschedule")
+@router.put("/reschedule", response_model=APIResponse[RescheduleResponse])
 def reschedule_booking(
     request: BookingRescheduleRequest,
     current_user: User = Depends(require_staff),
@@ -202,8 +203,8 @@ def reschedule_booking(
         db=db,
         garage_id=garage_id,
         booking_id=request.booking_id,
-        new_date=request.service_date,
-        new_time=booking.service_time,
+        new_date=request.new_date,
+        new_time=request.new_time,
     )
 
     return APIResponse(

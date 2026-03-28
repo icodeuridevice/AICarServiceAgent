@@ -80,11 +80,13 @@ export const getBookingApiErrorMessage = (
 
 export const rescheduleBooking = async (
     bookingId: number,
-    newDate: string
+    newDate: string,
+    newTime: string
 ): Promise<void> => {
     await api.put("/bookings/reschedule", {
         booking_id: bookingId,
-        service_date: newDate,
+        new_date: newDate,
+        new_time: newTime,
     });
 };
 
